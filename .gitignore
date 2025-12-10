@@ -1,7 +1,8 @@
 # Config file
 .emscripten
 .emscripten_backup
-
+CLAUDE.md
+.claude/
 # Emsdk generated version info
 .emsdk_version
 

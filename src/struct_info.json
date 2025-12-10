@@ -1307,6 +1307,16 @@
         }
     },
     {
+        "file": "emscripten/webtransport.h",
+        "structs": {
+            "EmscriptenWebTransportCreateAttributes": [
+                "allowPooling",
+                "congestionControl",
+                "requireUnreliable"
+            ]
+        }
+    },
+    {
         "file": "emscripten/webaudio.h",
         "structs": {
             "EmscriptenWebAudioCreateAttributes": [

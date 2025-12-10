@@ -751,6 +751,12 @@
             "isText": 12,
             "numBytes": 8
         },
+        "EmscriptenWebTransportCreateAttributes": {
+            "__size__": 16,
+            "allowPooling": 4,
+            "congestionControl": 8,
+            "requireUnreliable": 12
+        },
         "EmscriptenWheelEvent": {
             "__size__": 96,
             "deltaMode": 88,

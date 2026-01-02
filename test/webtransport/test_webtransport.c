@@ -6,6 +6,20 @@
 #include <assert.h>
 
 #define ECHO_SERVER_URL "https://wt-ord.akaleapi.net:6161/echo"
+//#define ECHO_SERVER_URL "https://127.0.0.1:4433/wt"
+
+EM_JS(uint8_t*, base64_decode_js, (const char* b64_cstr, int* out_len), {
+  const b64 = UTF8ToString(b64_cstr);
+
+  // Requires an engine that supports Uint8Array.fromBase64()
+  const bytes = Uint8Array.fromBase64(b64);
+
+  const ptr = _malloc(bytes.length);
+  HEAPU8.set(bytes, ptr);
+  HEAP32[out_len >> 2] = bytes.length;
+
+  return ptr;
+});
 
 // Test 1: Check if WebTransport is supported
 void test_is_supported() {
@@ -16,108 +30,62 @@ void test_is_supported() {
 
 // Global state for connection test
 EMSCRIPTEN_WEBTRANSPORT_T g_transport = 0;
-int g_poll_count = 0;
-unsigned short g_last_state = EMSCRIPTEN_WEBTRANSPORT_STATE_CONNECTING;
+int g_onready_callback_fired = 0;
+int g_onclosed_callback_fired = 0;
+unsigned short g_closed_callback_code = 0;
+char g_closed_callback_reason[256] = {0};
 
-// Polling callback to check connection state
-void poll_connection_state(void* userData) {
-  unsigned short state;
-  EMSCRIPTEN_RESULT result;
+// Deferred exit callback - called after JS cleanup completes
+void deferred_exit(void* userData) {
+  (void)userData;
+  emscripten_force_exit(0);
+}
 
-  result = emscripten_webtransport_get_ready_state(g_transport, &state);
+// Callback function for onclosed event
+void on_webtransport_closed(EMSCRIPTEN_WEBTRANSPORT_T transport, void* userData, unsigned short closeCode, const char* reason) {
+  printf("  onclosed callback fired! transport=%d, userData=%p, closeCode=%d, reason=%s\n", transport, userData, closeCode, reason ? reason : "(null)");
+  g_onclosed_callback_fired = 1;
+  g_closed_callback_code = closeCode;
+  if (reason) {
+    strncpy(g_closed_callback_reason, reason, sizeof(g_closed_callback_reason) - 1);
+    g_closed_callback_reason[sizeof(g_closed_callback_reason) - 1] = '\0';
+  }
+  assert(transport == g_transport);
+  assert(userData == (void*)0x87654321);  // Verify userData is passed correctly
+
+  // Connection closed - verify and clean up
+  printf("  Connection closed normally\n");
+  printf("  PASS: onclosed callback was fired as expected\n");
+  printf("  onclosed callback closeCode: %d\n", g_closed_callback_code);
+  printf("  onclosed callback reason: %s\n", g_closed_callback_reason);
+
+  // Clean up
+  EMSCRIPTEN_RESULT result = emscripten_webtransport_delete(g_transport);
   assert(result == EMSCRIPTEN_RESULT_SUCCESS);
 
-  g_poll_count++;
+  printf("  PASS: Connection test completed\n");
+  // Defer exit to allow JS code to complete cleanup (e.g., freeing memory)
+  emscripten_async_call(deferred_exit, NULL, 0);
+}
 
-  // Print state transitions
-  if (state != g_last_state) {
-    printf("  State transition: %d -> %d (poll count: %d)\n", g_last_state, state, g_poll_count);
-    g_last_state = state;
-  }
+// Callback function for onready event
+void on_webtransport_ready(EMSCRIPTEN_WEBTRANSPORT_T transport, void* userData) {
+  printf("  onready callback fired! transport=%d, userData=%p\n", transport, userData);
+  g_onready_callback_fired = 1;
+  assert(transport == g_transport);
+  assert(userData == (void*)0x12345678);  // Verify userData is passed correctly
 
-  // Check what state we're in
-  if (state == EMSCRIPTEN_WEBTRANSPORT_STATE_CONNECTING) {
-    // Still connecting, keep polling
-    if (g_poll_count < 100) {
-      emscripten_async_call(poll_connection_state, NULL, 100);
-    } else {
-      printf("  FAIL: Connection timeout after %d polls\n", g_poll_count);
-      emscripten_force_exit(1);
-    }
-  } else if (state == EMSCRIPTEN_WEBTRANSPORT_STATE_CONNECTED) {
-    // Connected! Verify URL
-    printf("  SUCCESS: Connected after %d polls\n", g_poll_count);
+  printf("  SUCCESS: Connected!\n");
+  printf("  PASS: onready callback was fired as expected\n");
 
-    // Get URL length
-    int urlLength;
-    result = emscripten_webtransport_get_url_length(g_transport, &urlLength);
-    assert(result == EMSCRIPTEN_RESULT_SUCCESS);
-    printf("  URL length: %d\n", urlLength);
+  EMSCRIPTEN_RESULT result;
 
-    // Get URL
-    char* url = (char*)malloc(urlLength);
-    result = emscripten_webtransport_get_url(g_transport, url, urlLength);
-    assert(result == EMSCRIPTEN_RESULT_SUCCESS);
-    printf("  URL: %s\n", url);
-    assert(strcmp(url, ECHO_SERVER_URL) == 0);
-    free(url);
+  // Close the connection
+  printf("  Closing connection...\n");
+  result = emscripten_webtransport_close(g_transport, 1000, "Test complete");
+  assert(result == EMSCRIPTEN_RESULT_SUCCESS);
 
-    // Close the connection
-    printf("  Closing connection...\n");
-    result = emscripten_webtransport_close(g_transport, 1000, "Test complete");
-    assert(result == EMSCRIPTEN_RESULT_SUCCESS);
-
-    // Continue polling to wait for CLOSED state
-    emscripten_async_call(poll_connection_state, NULL, 100);
-  } else if (state == EMSCRIPTEN_WEBTRANSPORT_STATE_CLOSED) {
-    // Connection closed normally
-    printf("  Connection closed normally\n");
-
-    // Get close code
-    unsigned short closeCode;
-    result = emscripten_webtransport_get_close_code(g_transport, &closeCode);
-    assert(result == EMSCRIPTEN_RESULT_SUCCESS);
-    printf("  Close code: %d\n", closeCode);
-
-    // Get close reason length
-    int reasonLength;
-    result = emscripten_webtransport_get_close_reason_length(g_transport, &reasonLength);
-    assert(result == EMSCRIPTEN_RESULT_SUCCESS);
-
-    // Get close reason
-    if (reasonLength > 0) {
-      char* reason = (char*)malloc(reasonLength);
-      result = emscripten_webtransport_get_close_reason(g_transport, reason, reasonLength);
-      assert(result == EMSCRIPTEN_RESULT_SUCCESS);
-      printf("  Close reason: %s\n", reason);
-      free(reason);
-    }
-
-    // Clean up
-    result = emscripten_webtransport_delete(g_transport);
-    assert(result == EMSCRIPTEN_RESULT_SUCCESS);
-
-    printf("  PASS: Connection test completed\n");
-    emscripten_force_exit(0);
-  } else if (state == EMSCRIPTEN_WEBTRANSPORT_STATE_FAILED) {
-    // Connection failed
-    printf("  FAIL: Connection failed (state: %d)\n", state);
-
-    // Try to get close reason
-    int reasonLength;
-    result = emscripten_webtransport_get_close_reason_length(g_transport, &reasonLength);
-    if (result == EMSCRIPTEN_RESULT_SUCCESS && reasonLength > 0) {
-      char* reason = (char*)malloc(reasonLength);
-      result = emscripten_webtransport_get_close_reason(g_transport, reason, reasonLength);
-      if (result == EMSCRIPTEN_RESULT_SUCCESS) {
-        printf("  Failure reason: %s\n", reason);
-      }
-      free(reason);
-    }
-
-    emscripten_webtransport_delete(g_transport);
-    emscripten_force_exit(1);
-  }
+  // The onclosed callback will be fired when the connection is closed
 }
 
 // Test 2: Basic connection test
@@ -125,12 +93,25 @@ void test_basic_connection() {
   printf("Test 2: Basic connection to echo server...\n");
 
   // Initialize create attributes
-  EmscriptenWebTransportCreateAttributes attrs;
-  emscripten_webtransport_init_create_attributes(&attrs);
-  attrs.url = ECHO_SERVER_URL;
+  WebTransportCreateOptions options;
+
+  const char* hash = "cel9H4o2q3nSvzQ8wk7OLGRM1yNQ7fbOw6WbHvM/b1U=";
+
+  int outputLength = 0;
+  uint8_t* c = base64_decode_js(hash, &outputLength);
+  assert(c && outputLength > 0);
+
+  options.serverCertificateHashesCount = 1;
+  options.serverCertificateHashes = (WebTransportHash*)malloc(sizeof(WebTransportHash));
+  options.serverCertificateHashes[0].algorithm = "sha-256";
+  //options.serverCertificateHashes[0].value = (void*)hash;
+  options.serverCertificateHashes[0].value = c;
+  //options.serverCertificateHashes[0].valueLength = strlen(hash);
+  options.serverCertificateHashes[0].valueLength = (int)outputLength;
 
   // Create WebTransport connection
-  g_transport = emscripten_webtransport_new(&attrs);
+  //g_transport = emscripten_webtransport_new(ECHO_SERVER_URL, &options);
+  g_transport = emscripten_webtransport_new(ECHO_SERVER_URL, NULL);
   if (g_transport <= 0) {
     printf("  FAIL: Could not create WebTransport (error: %d)\n", g_transport);
     emscripten_force_exit(1);
@@ -139,9 +120,20 @@ void test_basic_connection() {
 
   printf("  Created WebTransport with handle: %d\n", g_transport);
 
-  // Start polling for connection state
-  printf("  Polling for connection state...\n");
-  emscripten_async_call(poll_connection_state, NULL, 100);
+  // Register the onready callback
+  printf("  Registering onready callback...\n");
+  EMSCRIPTEN_RESULT result = emscripten_webtransport_set_onready_callback(g_transport, (void*)0x12345678, on_webtransport_ready);
+  assert(result == EMSCRIPTEN_RESULT_SUCCESS);
+  printf("  onready callback registered successfully\n");
+
+  // Register the onclosed callback
+  printf("  Registering onclosed callback...\n");
+  result = emscripten_webtransport_set_onclosed_callback(g_transport, (void*)0x87654321, on_webtransport_closed);
+  assert(result == EMSCRIPTEN_RESULT_SUCCESS);
+  printf("  onclosed callback registered successfully\n");
+
+  // The test will continue via callbacks
+  printf("  Waiting for connection...\n");
 }
 
 int main() {
@@ -152,6 +144,7 @@ int main() {
 
   test_basic_connection();
 
-  // The test will exit via emscripten_force_exit() when complete
+  // Keep the runtime alive until the closed callback fires and calls emscripten_force_exit()
+  emscripten_exit_with_live_runtime();
   return 0;
 }

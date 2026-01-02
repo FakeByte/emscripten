@@ -22,106 +22,83 @@ var LibraryWebTransport = {
   emscripten_webtransport_is_supported: () => typeof WebTransport != 'undefined',
 
   emscripten_webtransport_new__proxy: 'sync',
-  emscripten_webtransport_new: (createAttributes) => {
+  emscripten_webtransport_new: (url, createOptions) => {
     if (!globalThis.WebTransport) {
       return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
     }
-    if (!createAttributes) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+
+    let urlString = UTF8ToString(url);
+
+    let options = {};
+    if (createOptions) {
+      options.serverCertificateHashes = [];
+      let hashesCount = {{{ makeGetValue('createOptions', C_STRUCTS.WebTransportCreateOptions.serverCertificateHashesCount, 'i32') }}};
+      let hashes = {{{ makeGetValue('createOptions', C_STRUCTS.WebTransportCreateOptions.serverCertificateHashes, '*') }}};
+
+      while (hashesCount--) {
+        let valuePtr = {{{ makeGetValue('hashes', C_STRUCTS.WebTransportHash.value, '*') }}};
+        let valueLength = {{{ makeGetValue('hashes', C_STRUCTS.WebTransportHash.valueLength, 'i32') }}};
+        options.serverCertificateHashes.push({
+          algorithm: UTF8ToString({{{ makeGetValue('hashes', C_STRUCTS.WebTransportHash.algorithm, '*') }}}),
+          value: {{{ makeHEAPView('U8', 'valuePtr', 'valuePtr+valueLength') }}}
+        });
+        hashes += {{{ C_STRUCTS.WebTransportHash.__size__ }}};
+      }
     }
 
-    var url = UTF8ToString({{{ makeGetValue('createAttributes', 0, '*') }}});
-    var allowPooling = {{{ makeGetValue('createAttributes', C_STRUCTS.EmscriptenWebTransportCreateAttributes.allowPooling, 'i8') }}};
-    var congestionControlPtr = {{{ makeGetValue('createAttributes', C_STRUCTS.EmscriptenWebTransportCreateAttributes.congestionControl, '*') }}};
-    var requireUnreliable = {{{ makeGetValue('createAttributes', C_STRUCTS.EmscriptenWebTransportCreateAttributes.requireUnreliable, 'i8') }}};
+    // Create the WebTransport instance
+    let transport = new WebTransport(urlString, options);
 
-    // Build options object
-    var options = {};
-    if (allowPooling) options.allowPooling = true;
-    if (congestionControlPtr) options.congestionControl = UTF8ToString(congestionControlPtr);
-    if (requireUnreliable) options.requireUnreliable = true;
-
-    try {
-      // Create the WebTransport instance
-      var transport = new WebTransport(url, options);
-
-      // Create wrapper object to track state
-      var wrapper = {
-        transport: transport,
-        url: url,
-        readyState: 0, // CONNECTING
-        closeCode: 0,
-        closeReason: ''
-      };
-
-      // Set up ready promise handler
-      transport.ready.then(() => {
-        wrapper.readyState = 1; // CONNECTED
-      }).catch((e) => {
-        wrapper.readyState = 3; // FAILED
-        wrapper.closeReason = e.message || 'Connection failed';
-      });
-
-      // Set up closed promise handler
-      transport.closed.then((closeInfo) => {
-        wrapper.readyState = 2; // CLOSED
-        wrapper.closeCode = closeInfo?.closeCode || 0;
-        wrapper.closeReason = closeInfo?.reason || '';
-      }).catch((e) => {
-        wrapper.readyState = 3; // FAILED
-        wrapper.closeReason = e.message || 'Connection closed abruptly';
-      });
-
-      // Allocate handle and return
-      var transportId = webTransports.allocate(wrapper);
-
-      return transportId;
-    } catch (e) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_FAILED }}};
-    }
+    return webTransports.allocate(transport);
   },
 
-  emscripten_webtransport_get_ready_state__deps: ['$WT'],
-  emscripten_webtransport_get_ready_state__proxy: 'sync',
-  emscripten_webtransport_get_ready_state: (transportId, readyState) => {
-    var wrapper = WT.getTransport(transportId);
-    if (!wrapper) {
+  emscripten_webtransport_set_onready_callback__deps: ['$WT'],
+  emscripten_webtransport_set_onready_callback__proxy: 'sync',
+  emscripten_webtransport_set_onready_callback: (transportId, userData, callbackFunc) => {
+    var transport = WT.getTransport(transportId);
+    if (!transport) {
       return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
     }
 
-    {{{ makeSetValue('readyState', '0', 'wrapper.readyState', 'i16') }}};
+    transport.ready.then(() => {
+      out("WebTransport ready fired");
+
+      {{{ makeDynCall('vip', 'callbackFunc') }}}(transportId, userData);
+    });
+
     return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
   },
 
-  emscripten_webtransport_get_url__deps: ['$WT', '$stringToUTF8'],
-  emscripten_webtransport_get_url__proxy: 'sync',
-  emscripten_webtransport_get_url: (transportId, url, urlLength) => {
-    var wrapper = WT.getTransport(transportId);
-    if (!wrapper) {
+  emscripten_webtransport_set_onclosed_callback__deps: ['$WT', '$stringToNewUTF8', 'free'],
+  emscripten_webtransport_set_onclosed_callback__proxy: 'sync',
+  emscripten_webtransport_set_onclosed_callback: (transportId, userData, callbackFunc) => {
+    var transport = WT.getTransport(transportId);
+    if (!transport) {
       return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
     }
-    if (!url) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
-    stringToUTF8(wrapper.url, url, urlLength);
-    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
-  },
 
-  emscripten_webtransport_get_url_length__deps: ['$WT', '$lengthBytesUTF8'],
-  emscripten_webtransport_get_url_length__proxy: 'sync',
-  emscripten_webtransport_get_url_length: (transportId, urlLength) => {
-    var wrapper = WT.getTransport(transportId);
-    if (!wrapper) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
-    }
-    if (!urlLength) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
-    {{{ makeSetValue('urlLength', '0', 'lengthBytesUTF8(wrapper.url)+1', 'i32') }}};
+    transport.closed.then((closeInfo) => {
+      out("WebTransport closed fired");
+      var closeCode = closeInfo?.closeCode || 0;
+      var reason = closeInfo?.reason || '';
+      var reasonPtr = stringToNewUTF8(reason);
+      {{{ makeDynCall('vipip', 'callbackFunc') }}}(transportId, userData, closeCode, reasonPtr);
+      _free(reasonPtr);
+    }).catch((e) => {
+      out("WebTransport closed with error: " + e.message);
+      var reasonPtr = stringToNewUTF8(e.message || 'Connection closed abruptly');
+      {{{ makeDynCall('vipip', 'callbackFunc') }}}(transportId, userData, 0, reasonPtr);
+      _free(reasonPtr);
+    });
+
     return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
   },
 
   emscripten_webtransport_close__deps: ['$WT'],
   emscripten_webtransport_close__proxy: 'sync',
   emscripten_webtransport_close: (transportId, closeCode, reason) => {
-    var wrapper = WT.getTransport(transportId);
-    if (!wrapper) {
+    var transport = WT.getTransport(transportId);
+    if (!transport) {
       return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
     }
 
@@ -134,54 +111,18 @@ var LibraryWebTransport = {
       if (reasonStr) closeInfo.reason = reasonStr;
 
       // Close the transport
-      wrapper.transport.close(closeInfo);
+      transport.close(closeInfo);
       return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
     } catch (e) {
       return {{{ cDefs.EMSCRIPTEN_RESULT_FAILED }}};
     }
   },
 
-  emscripten_webtransport_get_close_code__deps: ['$WT'],
-  emscripten_webtransport_get_close_code__proxy: 'sync',
-  emscripten_webtransport_get_close_code: (transportId, closeCode) => {
-    var wrapper = WT.getTransport(transportId);
-    if (!wrapper) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
-    }
-
-    {{{ makeSetValue('closeCode', '0', 'wrapper.closeCode', 'i16') }}};
-    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
-  },
-
-  emscripten_webtransport_get_close_reason__deps: ['$WT', '$stringToUTF8'],
-  emscripten_webtransport_get_close_reason__proxy: 'sync',
-  emscripten_webtransport_get_close_reason: (transportId, reason, reasonLength) => {
-    var wrapper = WT.getTransport(transportId);
-    if (!wrapper) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
-    }
-    if (!reason) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
-    stringToUTF8(wrapper.closeReason, reason, reasonLength);
-    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
-  },
-
-  emscripten_webtransport_get_close_reason_length__deps: ['$WT', '$lengthBytesUTF8'],
-  emscripten_webtransport_get_close_reason_length__proxy: 'sync',
-  emscripten_webtransport_get_close_reason_length: (transportId, reasonLength) => {
-    var wrapper = WT.getTransport(transportId);
-    if (!wrapper) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
-    }
-    if (!reasonLength) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
-    {{{ makeSetValue('reasonLength', '0', 'lengthBytesUTF8(wrapper.closeReason)+1', 'i32') }}};
-    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
-  },
-
   emscripten_webtransport_delete__deps: ['$WT'],
   emscripten_webtransport_delete__proxy: 'sync',
   emscripten_webtransport_delete: (transportId) => {
-    var wrapper = WT.getTransport(transportId);
-    if (!wrapper) {
+    var transport = WT.getTransport(transportId);
+    if (!transport) {
       return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
     }
 
@@ -194,8 +135,8 @@ var LibraryWebTransport = {
   emscripten_webtransport_deinitialize: () => {
     for (var i in webTransports.allocated) {
       if (webTransports.has(i)) {
-        var wrapper = webTransports.get(i);
-        wrapper.transport.close();
+        var transport = webTransports.get(i);
+        transport.close();
         _emscripten_webtransport_delete(i);
       }
     }

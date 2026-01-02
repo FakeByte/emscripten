@@ -1309,10 +1309,14 @@
     {
         "file": "emscripten/webtransport.h",
         "structs": {
-            "EmscriptenWebTransportCreateAttributes": [
-                "allowPooling",
-                "congestionControl",
-                "requireUnreliable"
+            "WebTransportHash": [
+              "algorithm",
+              "value",
+              "valueLength"
+            ],
+            "WebTransportCreateOptions": [
+                "serverCertificateHashes",
+                "serverCertificateHashesCount"
             ]
         }
     },

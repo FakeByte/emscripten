@@ -6,8 +6,9 @@
 
 var LibraryWebTransport = {
   // Maps handles to transport records: {transport, callbacks, streams,
-  // deleted}, where `callbacks` holds the currently registered callback entry
-  // for each promise of the transport and `streams` the ids of its streams.
+  // incomingReaders, deleted}, where `callbacks` holds the currently registered
+  // callback entry for each promise of the transport, `streams` the ids of its
+  // streams and `incomingReaders` the readers of its incoming*Streams.
   $webTransports__deps: ['$HandleAllocator'],
   $webTransports: 'new HandleAllocator();',
 
@@ -32,6 +33,17 @@ var LibraryWebTransport = {
       var streamId = webTransportStreams.allocate({transport, ...stream});
       transport.streams.add(streamId);
       return streamId;
+    },
+
+    // Returns the handles of the readable and the writable side of a
+    // WebTransportBidirectionalStream.
+    allocateBidirectionalStream(transport, stream) {
+      return [WT.allocateStream(transport, {readable: stream.readable}), WT.allocateStream(transport, {writable: stream.writable})];
+    },
+
+    // Reads the next stream from one of the transport's incoming*Streams.
+    readIncoming(record, name) {
+      return WT.attempt(() => (record.incomingReaders[name] ??= record.transport[name].getReader()).read());
     },
 
     deleteStream(streamId) {
@@ -181,7 +193,7 @@ var LibraryWebTransport = {
     } catch (e) {
       return WT.resultFromException(e);
     }
-    return webTransports.allocate({transport, callbacks: {}, streams: new Set()});
+    return webTransports.allocate({transport, callbacks: {}, streams: new Set(), incomingReaders: {}});
   },
 
   emscripten_webtransport_set_onready_callback__deps: ['$WT'],
@@ -278,7 +290,7 @@ var LibraryWebTransport = {
     // Deactivates all pending callbacks, see setPromiseCallback().
     record.callbacks = {};
     record.deleted = true;
-    record.incomingUnidirectionalReader?.releaseLock();
+    for (var reader of Object.values(record.incomingReaders)) reader.releaseLock();
     for (var streamId of record.streams) WT.deleteStream(streamId);
     webTransports.free(transportId);
     return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
@@ -304,10 +316,36 @@ var LibraryWebTransport = {
     var record = WT.getTransport(transportId);
     if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
     if (!callback) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
-    var promise = WT.attempt(() => (record.incomingUnidirectionalReader ??= record.transport.incomingUnidirectionalStreams.getReader()).read());
-    WT.onSettled(promise, () => !record.deleted, (result, error) => {
+    WT.onSettled(WT.readIncoming(record, 'incomingUnidirectionalStreams'), () => !record.deleted, (result, error) => {
       var streamId = result?.done === false ? WT.allocateStream(record, {readable: result.value}) : 0;
       {{{ makeDynCall('viipp', 'callback') }}}(transportId, streamId, error, userData);
+    });
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_create_bidirectional_stream__deps: ['$WT'],
+  emscripten_webtransport_create_bidirectional_stream__proxy: 'sync',
+  emscripten_webtransport_create_bidirectional_stream: (transportId, options, userData, callback) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!callback) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+    var promise = WT.attempt(() => record.transport.createBidirectionalStream(WT.readSendStreamOptions(options)));
+    WT.onSettled(promise, () => !record.deleted, (stream, error) => {
+      var [readableId, writableId] = stream ? WT.allocateBidirectionalStream(record, stream) : [0, 0];
+      {{{ makeDynCall('viiipp', 'callback') }}}(transportId, readableId, writableId, error, userData);
+    });
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_read_incoming_bidirectional_stream__deps: ['$WT'],
+  emscripten_webtransport_read_incoming_bidirectional_stream__proxy: 'sync',
+  emscripten_webtransport_read_incoming_bidirectional_stream: (transportId, userData, callback) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!callback) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+    WT.onSettled(WT.readIncoming(record, 'incomingBidirectionalStreams'), () => !record.deleted, (result, error) => {
+      var [readableId, writableId] = result?.done === false ? WT.allocateBidirectionalStream(record, result.value) : [0, 0];
+      {{{ makeDynCall('viiipp', 'callback') }}}(transportId, readableId, writableId, error, userData);
     });
     return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
   },

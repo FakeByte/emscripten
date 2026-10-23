@@ -419,6 +419,11 @@ static void fail_on_stream(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_
   emscripten_force_exit(1);
 }
 
+static void fail_on_bidi_stream(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T readable, EMSCRIPTEN_WEBTRANSPORT_STREAM_T writable, const WebTransportError *error, void *userData) {
+  printf("FAIL [%s] unexpected bidirectional stream callback for transport %d\n", current_test_name, t);
+  emscripten_force_exit(1);
+}
+
 // Checks that calls a writable stream does not support fail.
 static void check_not_readable(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream) {
   char buffer[4];
@@ -456,8 +461,11 @@ static void test_stream_invalid_arguments(void) {
   CHECK_RESULT(emscripten_webtransport_create_unidirectional_stream(shared, NULL, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_PARAM);
   CHECK_RESULT(emscripten_webtransport_read_incoming_unidirectional_stream(12345, NULL, fail_on_stream), EMSCRIPTEN_RESULT_INVALID_TARGET);
   CHECK_RESULT(emscripten_webtransport_read_incoming_unidirectional_stream(shared, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_PARAM);
-  CHECK_RESULT(emscripten_webtransport_stream_read(12345, buffer, sizeof(buffer), NULL, fail_on_read), EMSCRIPTEN_RESULT_INVALID_TARGET);
-  CHECK_RESULT(emscripten_webtransport_stream_write(12345, "x", 1, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_create_bidirectional_stream(12345, NULL, NULL, fail_on_bidi_stream), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_create_bidirectional_stream(shared, NULL, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_PARAM);
+  CHECK_RESULT(emscripten_webtransport_read_incoming_bidirectional_stream(12345, NULL, fail_on_bidi_stream), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_read_incoming_bidirectional_stream(shared, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_PARAM);
+  CHECK_RESULT(emscripten_webtransport_stream_read(12345, buffer, sizeof(buffer), NULL, fail_on_read), EMSCRIPTEN_RESULT_INVALID_TARGET);  CHECK_RESULT(emscripten_webtransport_stream_write(12345, "x", 1, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_TARGET);
   CHECK_RESULT(emscripten_webtransport_stream_close(12345, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_TARGET);
   CHECK_RESULT(emscripten_webtransport_stream_abort(12345, 0), EMSCRIPTEN_RESULT_INVALID_TARGET);
   CHECK_RESULT(emscripten_webtransport_stream_cancel(12345, 0), EMSCRIPTEN_RESULT_INVALID_TARGET);
@@ -492,6 +500,10 @@ static void on_incoming_uni_stream(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTR
   CHECK_NO_ERROR(error);
   CHECK(stream > 0);
   check_not_writable(stream);
+  char buffer[4];
+  CHECK_RESULT(emscripten_webtransport_stream_read(stream, NULL, 4, NULL, fail_on_read), EMSCRIPTEN_RESULT_INVALID_PARAM);
+  CHECK_RESULT(emscripten_webtransport_stream_read(stream, buffer, 0, NULL, fail_on_read), EMSCRIPTEN_RESULT_INVALID_PARAM);
+  CHECK_RESULT(emscripten_webtransport_stream_read(stream, buffer, sizeof(buffer), NULL, NULL), EMSCRIPTEN_RESULT_INVALID_PARAM);
   start_reading(&reader, stream, 5, on_uni_echo_read);
 }
 
@@ -569,7 +581,77 @@ static void test_large_unidirectional_stream(void) {
   CHECK_SUCCESS(emscripten_webtransport_create_unidirectional_stream(shared, NULL, NULL, on_large_created));
 }
 
-// Closing the transport finishes waiting for incoming streams.
+// Echoes a message on a bidirectional stream. Before that, a read on another
+// bidirectional stream is left pending and its handle deleted: by the time the
+// second echo arrives the first one has arrived too, without calling the
+// deleted stream's read callback.
+
+static const char bidi_message[] = "Hello, bidirectional world!";
+static EMSCRIPTEN_WEBTRANSPORT_STREAM_T bidi_writable;
+
+static void finish_bidirectional_test(void) {
+  if (--pending_steps) return;
+  CHECK_SUCCESS(emscripten_webtransport_stream_delete(reader.stream));
+  CHECK_SUCCESS(emscripten_webtransport_stream_delete(bidi_writable));
+  next_test();
+}
+
+static void on_bidi_echo_read(StreamReader *r) {
+  printf("  received %zu bytes: %.*s\n", r->length, (int)r->length, r->data);
+  CHECK(r->length == strlen(bidi_message));
+  CHECK(memcmp(r->data, bidi_message, r->length) == 0);
+  finish_bidirectional_test();
+}
+
+static void on_bidi_closed(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  finish_bidirectional_test();
+}
+
+static void on_bidi_created(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T readable, EMSCRIPTEN_WEBTRANSPORT_STREAM_T writable, const WebTransportError *error, void *userData) {
+  CHECK(t == shared);
+  CHECK(userData == (void *)0x55);
+  CHECK_NO_ERROR(error);
+  CHECK(readable > 0 && writable > 0 && readable != writable);
+  check_not_writable(readable);
+  check_not_readable(writable);
+  bidi_writable = writable;
+  start_reading(&reader, readable, 8, on_bidi_echo_read);
+  CHECK_SUCCESS(emscripten_webtransport_stream_write(writable, bidi_message, strlen(bidi_message), NULL, check_write_succeeded));
+  CHECK_SUCCESS(emscripten_webtransport_stream_close(writable, NULL, on_bidi_closed));
+}
+
+static void on_abandoned_bidi_created(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T readable, EMSCRIPTEN_WEBTRANSPORT_STREAM_T writable, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  static char buffer[64];
+  CHECK_SUCCESS(emscripten_webtransport_stream_read(readable, buffer, sizeof(buffer), NULL, fail_on_read));
+  CHECK_SUCCESS(emscripten_webtransport_stream_delete(readable));
+  CHECK_SUCCESS(emscripten_webtransport_stream_write(writable, "echo", 4, NULL, NULL));
+  CHECK_SUCCESS(emscripten_webtransport_stream_close(writable, NULL, NULL));
+  CHECK_SUCCESS(emscripten_webtransport_stream_delete(writable));
+
+  WebTransportSendStreamOptions options = {.sendOrder = -3};
+  CHECK_SUCCESS(emscripten_webtransport_create_bidirectional_stream(shared, &options, (void *)0x55, on_bidi_created));
+}
+
+static void test_bidirectional_stream(void) {
+  // Callbacks of the end of the echo and of the close.
+  pending_steps = 2;
+  CHECK_SUCCESS(emscripten_webtransport_create_bidirectional_stream(shared, NULL, NULL, on_abandoned_bidi_created));
+}
+
+// Closing the transport finishes waiting for incoming streams. The echo server
+// never opens bidirectional streams, so that wait only ends here.
+
+static void on_no_more_bidi_streams(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T readable, EMSCRIPTEN_WEBTRANSPORT_STREAM_T writable, const WebTransportError *error, void *userData) {
+  CHECK(t == shared);
+  CHECK_NO_ERROR(error);
+  CHECK(readable == 0 && writable == 0);
+  if (--pending_steps == 0) {
+    CHECK_SUCCESS(emscripten_webtransport_delete(shared));
+    next_test();
+  }
+}
 
 static void on_shared_closed(EMSCRIPTEN_WEBTRANSPORT_T t, const WebTransportCloseInfo *closeInfo, const WebTransportError *error, void *userData) {
   CHECK_NO_ERROR(error);
@@ -590,8 +672,9 @@ static void on_no_more_uni_streams(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTR
 }
 
 static void test_close_shared_transport(void) {
-  pending_steps = 2;
+  pending_steps = 3;
   CHECK_SUCCESS(emscripten_webtransport_read_incoming_unidirectional_stream(shared, NULL, on_no_more_uni_streams));
+  CHECK_SUCCESS(emscripten_webtransport_read_incoming_bidirectional_stream(shared, NULL, on_no_more_bidi_streams));
   CHECK_SUCCESS(emscripten_webtransport_set_onclosed_callback(shared, NULL, on_shared_closed));
   CHECK_SUCCESS(emscripten_webtransport_close(shared, NULL));
 }
@@ -697,6 +780,7 @@ static const Test all_tests[] = {
   {"stream_invalid_arguments", test_stream_invalid_arguments},
   {"unidirectional_stream", test_unidirectional_stream},
   {"large_unidirectional_stream", test_large_unidirectional_stream},
+  {"bidirectional_stream", test_bidirectional_stream},
   {"close_shared_transport", test_close_shared_transport},
   {"abort_and_cancel", test_abort_and_cancel},
   {"delete_removes_callbacks", test_delete_removes_callbacks},

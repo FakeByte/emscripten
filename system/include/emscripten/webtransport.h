@@ -192,6 +192,18 @@ EMSCRIPTEN_RESULT emscripten_webtransport_create_unidirectional_stream(EMSCRIPTE
 // stream opened by the server, and calls callback with its readable side.
 EMSCRIPTEN_RESULT emscripten_webtransport_read_incoming_unidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData, em_webtransport_stream_callback_func callback);
 
+// Called with the readable and the writable side of a new bidirectional
+// stream, or with both 0 like em_webtransport_stream_callback_func.
+typedef void (*em_webtransport_bidirectional_stream_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, EMSCRIPTEN_WEBTRANSPORT_STREAM_T readable, EMSCRIPTEN_WEBTRANSPORT_STREAM_T writable, const WebTransportError *error, void *userData);
+
+// WebTransport.createBidirectionalStream(): opens a bidirectional stream to the
+// server. options can be NULL.
+EMSCRIPTEN_RESULT emscripten_webtransport_create_bidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportSendStreamOptions *options, void *userData, em_webtransport_bidirectional_stream_callback_func callback);
+
+// Reads the next stream from WebTransport.incomingBidirectionalStreams, a
+// bidirectional stream opened by the server.
+EMSCRIPTEN_RESULT emscripten_webtransport_read_incoming_bidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData, em_webtransport_bidirectional_stream_callback_func callback);
+
 // Called once a read finished. On success numBytes bytes were written to the
 // buffer passed to emscripten_webtransport_stream_read(). done is true once
 // the end of the stream is reached, in which case numBytes is 0.

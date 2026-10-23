@@ -480,6 +480,9 @@
         "UTIME_OMIT": 1073741822,
         "UUID_TYPE_DCE_RANDOM": 4,
         "UUID_VARIANT_DCE": 1,
+        "WEBTRANSPORT_ERROR_SOURCE_NONE": 0,
+        "WEBTRANSPORT_ERROR_SOURCE_SESSION": 2,
+        "WEBTRANSPORT_ERROR_SOURCE_STREAM": 1,
         "W_OK": 2,
         "X_OK": 1,
         "__WASI_CLOCKID_MONOTONIC": 1,
@@ -927,16 +930,23 @@
             "closeCode": 0,
             "reason": 8
         },
-        "WebTransportCreateOptions": {
-            "__size__": 16,
-            "serverCertificateHashes": 0,
-            "serverCertificateHashesCount": 8
+        "WebTransportError": {
+            "__size__": 24,
+            "message": 8,
+            "name": 0,
+            "source": 16,
+            "streamErrorCode": 20
         },
         "WebTransportHash": {
             "__size__": 24,
             "algorithm": 0,
             "value": 8,
             "valueLength": 16
+        },
+        "WebTransportOptions": {
+            "__size__": 16,
+            "serverCertificateHashes": 0,
+            "serverCertificateHashesCount": 8
         },
         "__cxa_exception": {
             "__size__": 48,

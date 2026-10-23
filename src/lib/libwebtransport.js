@@ -5,129 +5,153 @@
  */
 
 var LibraryWebTransport = {
+  // Maps handles to {transport, callbacks}, where `callbacks` holds the
+  // currently registered callback entry for each promise of the transport.
   $webTransports__deps: ['$HandleAllocator'],
-  $webTransports: "new HandleAllocator();",
+  $webTransports: 'new HandleAllocator();',
 
-  $WT__deps: ['$webTransports'],
+  $WT__deps: ['$webTransports', '$callUserCallback', '$withStackSave', '$stackAlloc', '$stringToUTF8OnStack'],
   $WT: {
     getTransport(transportId) {
-      if (!webTransports.has(transportId)) {
-        return 0;
+      return webTransports.has(transportId) ? webTransports.get(transportId) : null;
+    },
+
+    // Maps an exception thrown synchronously by the WebTransport API to an
+    // EMSCRIPTEN_RESULT.
+    resultFromException(e) {
+      switch (e?.name) {
+        case 'NotSupportedError': return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
+        case 'SyntaxError':
+        case 'TypeError':
+        case 'RangeError': return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+        default: return {{{ cDefs.EMSCRIPTEN_RESULT_FAILED }}};
       }
-      return webTransports.get(transportId);
+    },
+
+    // Writes `e`, the reason a promise was rejected with, as a
+    // WebTransportError struct to the stack and returns its address.
+    errorOnStack(e) {
+      var ptr = stackAlloc({{{ C_STRUCTS.WebTransportError.__size__ }}});
+      var source = {
+        'stream': {{{ cDefs.WEBTRANSPORT_ERROR_SOURCE_STREAM }}},
+        'session': {{{ cDefs.WEBTRANSPORT_ERROR_SOURCE_SESSION }}},
+      }[e?.source] ?? {{{ cDefs.WEBTRANSPORT_ERROR_SOURCE_NONE }}};
+      {{{ makeSetValue('ptr', C_STRUCTS.WebTransportError.name, 'stringToUTF8OnStack(e?.name ?? "Error")', '*') }}};
+      {{{ makeSetValue('ptr', C_STRUCTS.WebTransportError.message, 'stringToUTF8OnStack(e?.message ?? String(e))', '*') }}};
+      {{{ makeSetValue('ptr', C_STRUCTS.WebTransportError.source, 'source', 'i32') }}};
+      {{{ makeSetValue('ptr', C_STRUCTS.WebTransportError.streamErrorCode, 'e?.streamErrorCode ?? -1', 'i32') }}};
+      return ptr;
+    },
+
+    // Calls `callback(value, errorPtr)` from the event loop once `promise`
+    // settles, unless `isActive()` returns false by then. errorPtr is 0 if the
+    // promise fulfilled. Anything the callback allocates on the stack is
+    // released after it returns.
+    onSettled(promise, isActive, callback) {
+      var settle = (value, rejected, reason) => {
+        if (!isActive()) return;
+        callUserCallback(() => withStackSave(() => callback(value, rejected ? WT.errorOnStack(reason) : 0)));
+      };
+      promise.then((value) => settle(value, false), (reason) => settle(undefined, true, reason));
+    },
+
+    // Registers `invoke(value, errorPtr)` to run when the transport's promise
+    // named `name` settles, replacing the previously registered callback.
+    setPromiseCallback(transportId, name, callback, invoke) {
+      var record = WT.getTransport(transportId);
+      if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+      var entry = callback ? {} : null;
+      record.callbacks[name] = entry;
+      if (entry) WT.onSettled(record.transport[name], () => record.callbacks[name] === entry, invoke);
+      return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+    },
+
+    // Converts a WebTransportOptions struct to the JS options dictionary.
+    readOptions(ptr) {
+      if (!ptr) return undefined;
+      var options = {};
+      var hashes = {{{ makeGetValue('ptr', C_STRUCTS.WebTransportOptions.serverCertificateHashes, '*') }}};
+      var hashesCount = {{{ makeGetValue('ptr', C_STRUCTS.WebTransportOptions.serverCertificateHashesCount, '*') }}};
+      if (hashesCount) {
+        options.serverCertificateHashes = [];
+        for (var i = 0; i < hashesCount; i++) {
+          var hash = hashes + i * {{{ C_STRUCTS.WebTransportHash.__size__ }}};
+          var value = {{{ makeGetValue('hash', C_STRUCTS.WebTransportHash.value, '*') }}};
+          var valueLength = {{{ makeGetValue('hash', C_STRUCTS.WebTransportHash.valueLength, '*') }}};
+          options.serverCertificateHashes.push({
+            algorithm: UTF8ToString({{{ makeGetValue('hash', C_STRUCTS.WebTransportHash.algorithm, '*') }}}),
+            value: HEAPU8.slice(value, value + valueLength),
+          });
+        }
+      }
+      return options;
     },
   },
 
   emscripten_webtransport_is_supported__proxy: 'sync',
   emscripten_webtransport_is_supported: () => typeof WebTransport != 'undefined',
 
+  emscripten_webtransport_new__deps: ['$WT'],
   emscripten_webtransport_new__proxy: 'sync',
-  emscripten_webtransport_new: (url, createOptions) => {
-    if (!globalThis.WebTransport) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
+  emscripten_webtransport_new: (url, options) => {
+    if (typeof WebTransport == 'undefined') return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
+    if (!url) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+    try {
+      var transport = new WebTransport(UTF8ToString(url), WT.readOptions(options));
+    } catch (e) {
+      return WT.resultFromException(e);
     }
-
-    let urlString = UTF8ToString(url);
-
-    let options = {};
-    if (createOptions) {
-      options.serverCertificateHashes = [];
-      let hashesCount = {{{ makeGetValue('createOptions', C_STRUCTS.WebTransportCreateOptions.serverCertificateHashesCount, 'i32') }}};
-      let hashes = {{{ makeGetValue('createOptions', C_STRUCTS.WebTransportCreateOptions.serverCertificateHashes, '*') }}};
-
-      while (hashesCount--) {
-        let valuePtr = {{{ makeGetValue('hashes', C_STRUCTS.WebTransportHash.value, '*') }}};
-        let valueLength = {{{ makeGetValue('hashes', C_STRUCTS.WebTransportHash.valueLength, 'i32') }}};
-        options.serverCertificateHashes.push({
-          algorithm: UTF8ToString({{{ makeGetValue('hashes', C_STRUCTS.WebTransportHash.algorithm, '*') }}}),
-          value: {{{ makeHEAPView('U8', 'valuePtr', 'valuePtr+valueLength') }}}
-        });
-        hashes += {{{ C_STRUCTS.WebTransportHash.__size__ }}};
-      }
-    }
-
-    // Create the WebTransport instance
-    let transport = new WebTransport(urlString, options);
-
-    return webTransports.allocate(transport);
+    return webTransports.allocate({transport, callbacks: {}});
   },
 
   emscripten_webtransport_set_onready_callback__deps: ['$WT'],
   emscripten_webtransport_set_onready_callback__proxy: 'sync',
-  emscripten_webtransport_set_onready_callback: (transportId, userData, callbackFunc) => {
-    var transport = WT.getTransport(transportId);
-    if (!transport) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
-    }
+  emscripten_webtransport_set_onready_callback: (transportId, userData, callback) =>
+    WT.setPromiseCallback(transportId, 'ready', callback, (value, error) => {
+      {{{ makeDynCall('vipp', 'callback') }}}(transportId, error, userData);
+    }),
 
-    transport.ready.then(() => {
-      out("WebTransport ready fired");
-
-      {{{ makeDynCall('vip', 'callbackFunc') }}}(transportId, userData);
-    });
-
-    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
-  },
-
-  emscripten_webtransport_set_onclosed_callback__deps: ['$WT', '$stringToNewUTF8', 'free'],
+  emscripten_webtransport_set_onclosed_callback__deps: ['$WT'],
   emscripten_webtransport_set_onclosed_callback__proxy: 'sync',
-  emscripten_webtransport_set_onclosed_callback: (transportId, userData, callbackFunc) => {
-    var transport = WT.getTransport(transportId);
-    if (!transport) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
-    }
-
-    transport.closed.then((closeInfo) => {
-      out("WebTransport closed fired");
-      var closeCode = closeInfo?.closeCode || 0;
-      var reason = closeInfo?.reason || '';
-      var reasonPtr = stringToNewUTF8(reason);
-      {{{ makeDynCall('vipip', 'callbackFunc') }}}(transportId, userData, closeCode, reasonPtr);
-      _free(reasonPtr);
-    }).catch((e) => {
-      out("WebTransport closed with error: " + e.message);
-      var reasonPtr = stringToNewUTF8(e.message || 'Connection closed abruptly');
-      {{{ makeDynCall('vipip', 'callbackFunc') }}}(transportId, userData, 0, reasonPtr);
-      _free(reasonPtr);
-    });
-
-    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
-  },
+  emscripten_webtransport_set_onclosed_callback: (transportId, userData, callback) =>
+    WT.setPromiseCallback(transportId, 'closed', callback, (closeInfo, error) => {
+      var closeInfoPtr = 0;
+      if (!error) {
+        closeInfoPtr = stackAlloc({{{ C_STRUCTS.WebTransportCloseInfo.__size__ }}});
+        {{{ makeSetValue('closeInfoPtr', C_STRUCTS.WebTransportCloseInfo.closeCode, 'closeInfo.closeCode', 'u32') }}};
+        {{{ makeSetValue('closeInfoPtr', C_STRUCTS.WebTransportCloseInfo.reason, 'stringToUTF8OnStack(closeInfo.reason)', '*') }}};
+      }
+      {{{ makeDynCall('vippp', 'callback') }}}(transportId, closeInfoPtr, error, userData);
+    }),
 
   emscripten_webtransport_close__deps: ['$WT'],
   emscripten_webtransport_close__proxy: 'sync',
-  emscripten_webtransport_close: (transportId, closeInfoPtr) => {
-    var transport = WT.getTransport(transportId);
-    if (!transport) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+  emscripten_webtransport_close: (transportId, closeInfo) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    var info;
+    if (closeInfo) {
+      var reason = {{{ makeGetValue('closeInfo', C_STRUCTS.WebTransportCloseInfo.reason, '*') }}};
+      info = {
+        closeCode: {{{ makeGetValue('closeInfo', C_STRUCTS.WebTransportCloseInfo.closeCode, 'u32') }}},
+        reason: reason ? UTF8ToString(reason) : '',
+      };
     }
-
     try {
-      // Build close info object from struct if provided
-      var closeInfo = {};
-      if (closeInfoPtr) {
-        var closeCode = {{{ makeGetValue('closeInfoPtr', C_STRUCTS.WebTransportCloseInfo.closeCode, 'i32') }}};
-        var reasonPtr = {{{ makeGetValue('closeInfoPtr', C_STRUCTS.WebTransportCloseInfo.reason, '*') }}};
-        if (closeCode) closeInfo.closeCode = closeCode;
-        if (reasonPtr) closeInfo.reason = UTF8ToString(reasonPtr);
-      }
-
-      // Close the transport
-      transport.close(closeInfo);
-      return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+      record.transport.close(info);
     } catch (e) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_FAILED }}};
+      return WT.resultFromException(e);
     }
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
   },
 
   emscripten_webtransport_delete__deps: ['$WT'],
   emscripten_webtransport_delete__proxy: 'sync',
   emscripten_webtransport_delete: (transportId) => {
-    var transport = WT.getTransport(transportId);
-    if (!transport) {
-      return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
-    }
-
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    // Deactivates all pending callbacks, see setPromiseCallback().
+    record.callbacks = {};
     webTransports.free(transportId);
     return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
   },
@@ -135,14 +159,17 @@ var LibraryWebTransport = {
   emscripten_webtransport_deinitialize__deps: ['$webTransports', 'emscripten_webtransport_delete'],
   emscripten_webtransport_deinitialize__proxy: 'sync',
   emscripten_webtransport_deinitialize: () => {
-    for (var i in webTransports.allocated) {
-      if (webTransports.has(i)) {
-        var transport = webTransports.get(i);
-        transport.close();
-        _emscripten_webtransport_delete(i);
+    for (var id = 1; id < webTransports.allocated.length; id++) {
+      if (webTransports.has(id)) {
+        try {
+          webTransports.get(id).transport.close();
+        } catch (e) {
+          // Already closed or failed.
+        }
+        _emscripten_webtransport_delete(id);
       }
     }
-  }
+  },
 };
 
 addToLibrary(LibraryWebTransport);

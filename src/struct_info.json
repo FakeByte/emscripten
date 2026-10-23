@@ -1308,13 +1308,24 @@
     },
     {
         "file": "emscripten/webtransport.h",
+        "defines": [
+            "WEBTRANSPORT_ERROR_SOURCE_NONE",
+            "WEBTRANSPORT_ERROR_SOURCE_STREAM",
+            "WEBTRANSPORT_ERROR_SOURCE_SESSION"
+        ],
         "structs": {
-            "WebTransportHash": [
-              "algorithm",
-              "value",
-              "valueLength"
+            "WebTransportError": [
+                "name",
+                "message",
+                "source",
+                "streamErrorCode"
             ],
-            "WebTransportCreateOptions": [
+            "WebTransportHash": [
+                "algorithm",
+                "value",
+                "valueLength"
+            ],
+            "WebTransportOptions": [
                 "serverCertificateHashes",
                 "serverCertificateHashesCount"
             ],

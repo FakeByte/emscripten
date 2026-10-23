@@ -542,7 +542,7 @@ static void test_unidirectional_stream(void) {
   pending_steps = 3;
   // Waiting for an incoming stream can start before there is one.
   CHECK_SUCCESS(emscripten_webtransport_read_incoming_unidirectional_stream(shared, (void *)0x77, on_incoming_uni_stream));
-  WebTransportSendStreamOptions options = {.sendOrder = 5};
+  WebTransportSendOptions options = {.sendOrder = 5};
   CHECK_SUCCESS(emscripten_webtransport_create_unidirectional_stream(shared, &options, (void *)0x66, on_uni_created));
 }
 
@@ -630,7 +630,7 @@ static void on_abandoned_bidi_created(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WE
   CHECK_SUCCESS(emscripten_webtransport_stream_close(writable, NULL, NULL));
   CHECK_SUCCESS(emscripten_webtransport_stream_delete(writable));
 
-  WebTransportSendStreamOptions options = {.sendOrder = -3};
+  WebTransportSendOptions options = {.sendOrder = -3};
   CHECK_SUCCESS(emscripten_webtransport_create_bidirectional_stream(shared, &options, (void *)0x55, on_bidi_created));
 }
 
@@ -640,41 +640,179 @@ static void test_bidirectional_stream(void) {
   CHECK_SUCCESS(emscripten_webtransport_create_bidirectional_stream(shared, NULL, NULL, on_abandoned_bidi_created));
 }
 
-// Closing the transport finishes waiting for incoming streams. The echo server
-// never opens bidirectional streams, so that wait only ends here.
+// Sends datagrams and reads their echoes. Datagrams can get lost, so the same
+// datagram is sent repeatedly until echoes arrive.
+
+#define DATAGRAM_SIZE 100
+static uint8_t datagram[DATAGRAM_SIZE];
+static EMSCRIPTEN_WEBTRANSPORT_STREAM_T datagrams_readable;
+static EMSCRIPTEN_WEBTRANSPORT_STREAM_T datagrams_writable;
+static int resend_interval;
+static uint8_t datagram_buffer[1024];
+
+static void send_datagram(void *userData) {
+  CHECK_SUCCESS(emscripten_webtransport_stream_write(datagrams_writable, datagram, sizeof(datagram), NULL, check_write_succeeded));
+}
+
+static void start_sending_datagrams(EMSCRIPTEN_WEBTRANSPORT_STREAM_T writable) {
+  datagrams_writable = writable;
+  send_datagram(NULL);
+  resend_interval = emscripten_set_interval(send_datagram, 200, NULL);
+}
+
+static void finish_datagram_test(void) {
+  emscripten_clear_interval(resend_interval);
+  CHECK_SUCCESS(emscripten_webtransport_stream_delete(datagrams_writable));
+  next_test();
+}
+
+static void on_truncated_datagram(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, size_t numBytes, bool done, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  CHECK(!done);
+  printf("  received truncated datagram of %zu bytes\n", numBytes);
+  CHECK(numBytes == 10);
+  CHECK(memcmp(datagram_buffer, datagram, 10) == 0);
+  finish_datagram_test();
+}
+
+static void on_datagram(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, size_t numBytes, bool done, const WebTransportError *error, void *userData) {
+  CHECK(stream == datagrams_readable);
+  CHECK(userData == (void *)0x44);
+  CHECK_NO_ERROR(error);
+  CHECK(!done);
+  printf("  received datagram of %zu bytes\n", numBytes);
+  CHECK(numBytes == DATAGRAM_SIZE);
+  CHECK(memcmp(datagram_buffer, datagram, DATAGRAM_SIZE) == 0);
+  // A datagram that does not fit into the buffer is truncated.
+  CHECK_SUCCESS(emscripten_webtransport_stream_read(datagrams_readable, datagram_buffer, 10, NULL, on_truncated_datagram));
+}
+
+static void test_datagrams(void) {
+  size_t maxDatagramSize = 0;
+  CHECK_SUCCESS(emscripten_webtransport_get_max_datagram_size(shared, &maxDatagramSize));
+  printf("  maxDatagramSize: %zu\n", maxDatagramSize);
+  CHECK(maxDatagramSize >= DATAGRAM_SIZE);
+
+  double maxAge = 0;
+  CHECK_SUCCESS(emscripten_webtransport_get_incoming_max_age(shared, &maxAge));
+  printf("  incomingMaxAge: %f\n", maxAge);
+  CHECK(maxAge > 0);
+  CHECK_SUCCESS(emscripten_webtransport_set_incoming_max_age(shared, 5000));
+  CHECK_SUCCESS(emscripten_webtransport_get_incoming_max_age(shared, &maxAge));
+  CHECK(maxAge == 5000);
+  CHECK_SUCCESS(emscripten_webtransport_get_outgoing_max_age(shared, &maxAge));
+  printf("  outgoingMaxAge: %f\n", maxAge);
+  CHECK(maxAge > 0);
+  CHECK_SUCCESS(emscripten_webtransport_set_outgoing_max_age(shared, 2500.5));
+  CHECK_SUCCESS(emscripten_webtransport_get_outgoing_max_age(shared, &maxAge));
+  CHECK(maxAge == 2500.5);
+  CHECK_RESULT(emscripten_webtransport_set_incoming_max_age(shared, -1), EMSCRIPTEN_RESULT_INVALID_PARAM);
+  CHECK_RESULT(emscripten_webtransport_set_outgoing_max_age(shared, -1), EMSCRIPTEN_RESULT_INVALID_PARAM);
+  CHECK_SUCCESS(emscripten_webtransport_get_outgoing_max_age(shared, &maxAge));
+  CHECK(maxAge == 2500.5);
+
+  datagrams_readable = emscripten_webtransport_get_datagrams_readable(shared);
+  CHECK(datagrams_readable > 0);
+  CHECK(emscripten_webtransport_get_datagrams_readable(shared) == datagrams_readable);
+  check_not_writable(datagrams_readable);
+
+  WebTransportSendOptions options = {.sendOrder = 2};
+  EMSCRIPTEN_WEBTRANSPORT_STREAM_T writable = emscripten_webtransport_create_datagrams_writable(shared, &options);
+  CHECK(writable > 0);
+  check_not_readable(writable);
+
+  for (int i = 0; i < DATAGRAM_SIZE; i++) datagram[i] = 'a' + i % 26;
+  CHECK_SUCCESS(emscripten_webtransport_stream_read(datagrams_readable, datagram_buffer, sizeof(datagram_buffer), (void *)0x44, on_datagram));
+  start_sending_datagrams(writable);
+}
+
+// Without WebTransportDatagramDuplexStream.createWritable(), as in Chrome, the
+// deprecated datagrams.writable is used instead.
+
+static void read_new_datagram(void);
+
+static void on_new_datagram(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, size_t numBytes, bool done, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  CHECK(!done);
+  // Skip the echoes of the previous test that are still arriving.
+  if (numBytes != DATAGRAM_SIZE || memcmp(datagram_buffer, datagram, DATAGRAM_SIZE) != 0) {
+    read_new_datagram();
+    return;
+  }
+  finish_datagram_test();
+}
+
+static void read_new_datagram(void) {
+  CHECK_SUCCESS(emscripten_webtransport_stream_read(datagrams_readable, datagram_buffer, sizeof(datagram_buffer), NULL, on_new_datagram));
+}
+
+static void test_datagrams_without_create_writable(void) {
+  EM_ASM({
+    var proto = WebTransportDatagramDuplexStream.prototype;
+    Module.savedCreateWritable = proto.createWritable;
+    delete proto.createWritable;
+  });
+  CHECK(EM_ASM_INT(return 'createWritable' in WebTransportDatagramDuplexStream.prototype) == 0);
+  EMSCRIPTEN_WEBTRANSPORT_STREAM_T writable = emscripten_webtransport_create_datagrams_writable(shared, NULL);
+  EM_ASM(WebTransportDatagramDuplexStream.prototype.createWritable = Module.savedCreateWritable);
+  CHECK(writable > 0);
+
+  // A deleted datagrams readable handle is replaced by a new one.
+  CHECK_SUCCESS(emscripten_webtransport_stream_delete(datagrams_readable));
+  datagrams_readable = emscripten_webtransport_get_datagrams_readable(shared);
+  CHECK(datagrams_readable > 0);
+
+  for (int i = 0; i < DATAGRAM_SIZE; i++) datagram[i] = 'z' - i % 26;
+  read_new_datagram();
+  start_sending_datagrams(writable);
+}
+
+// Closing the transport finishes waiting for incoming streams and datagrams.
+// The echo server never opens bidirectional streams, so that wait only ends
+// here.
+
+static void finish_close_step(void) {
+  if (--pending_steps) return;
+  CHECK_SUCCESS(emscripten_webtransport_delete(shared));
+  next_test();
+}
 
 static void on_no_more_bidi_streams(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T readable, EMSCRIPTEN_WEBTRANSPORT_STREAM_T writable, const WebTransportError *error, void *userData) {
   CHECK(t == shared);
   CHECK_NO_ERROR(error);
   CHECK(readable == 0 && writable == 0);
-  if (--pending_steps == 0) {
-    CHECK_SUCCESS(emscripten_webtransport_delete(shared));
-    next_test();
-  }
-}
-
-static void on_shared_closed(EMSCRIPTEN_WEBTRANSPORT_T t, const WebTransportCloseInfo *closeInfo, const WebTransportError *error, void *userData) {
-  CHECK_NO_ERROR(error);
-  if (--pending_steps == 0) {
-    CHECK_SUCCESS(emscripten_webtransport_delete(shared));
-    next_test();
-  }
+  finish_close_step();
 }
 
 static void on_no_more_uni_streams(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
   CHECK(t == shared);
   CHECK_NO_ERROR(error);
   CHECK(stream == 0);
-  if (--pending_steps == 0) {
-    CHECK_SUCCESS(emscripten_webtransport_delete(shared));
-    next_test();
+  finish_close_step();
+}
+
+static void on_shared_closed(EMSCRIPTEN_WEBTRANSPORT_T t, const WebTransportCloseInfo *closeInfo, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  finish_close_step();
+}
+
+// Echoes of earlier datagrams can still arrive, so this reads datagrams until
+// the reads are done.
+static void on_datagram_until_done(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, size_t numBytes, bool done, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  if (done) {
+    CHECK(numBytes == 0);
+    finish_close_step();
+    return;
   }
+  CHECK_SUCCESS(emscripten_webtransport_stream_read(stream, datagram_buffer, sizeof(datagram_buffer), NULL, on_datagram_until_done));
 }
 
 static void test_close_shared_transport(void) {
-  pending_steps = 3;
+  pending_steps = 4;
   CHECK_SUCCESS(emscripten_webtransport_read_incoming_unidirectional_stream(shared, NULL, on_no_more_uni_streams));
   CHECK_SUCCESS(emscripten_webtransport_read_incoming_bidirectional_stream(shared, NULL, on_no_more_bidi_streams));
+  CHECK_SUCCESS(emscripten_webtransport_stream_read(datagrams_readable, datagram_buffer, sizeof(datagram_buffer), NULL, on_datagram_until_done));
   CHECK_SUCCESS(emscripten_webtransport_set_onclosed_callback(shared, NULL, on_shared_closed));
   CHECK_SUCCESS(emscripten_webtransport_close(shared, NULL));
 }
@@ -781,6 +919,8 @@ static const Test all_tests[] = {
   {"unidirectional_stream", test_unidirectional_stream},
   {"large_unidirectional_stream", test_large_unidirectional_stream},
   {"bidirectional_stream", test_bidirectional_stream},
+  {"datagrams", test_datagrams},
+  {"datagrams_without_create_writable", test_datagrams_without_create_writable},
   {"close_shared_transport", test_close_shared_transport},
   {"abort_and_cancel", test_abort_and_cancel},
   {"delete_removes_callbacks", test_delete_removes_callbacks},

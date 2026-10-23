@@ -106,11 +106,12 @@ typedef struct WebTransportCloseInfo {
   const char *reason;
 } WebTransportCloseInfo;
 
-// Options for creating outgoing streams.
-typedef struct WebTransportSendStreamOptions {
-  // Queued bytes of streams with a higher send order are sent first.
+// Options for creating outgoing streams and datagram writables.
+typedef struct WebTransportSendOptions {
+  // Queued bytes of streams and datagrams with a higher send order are sent
+  // first.
   int64_t sendOrder;
-} WebTransportSendStreamOptions;
+} WebTransportSendOptions;
 
 // Returns true if the browser supports WebTransport.
 bool emscripten_webtransport_is_supported(void);
@@ -191,7 +192,7 @@ typedef void (*em_webtransport_stream_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T t
 // Opens a unidirectional stream to the server with
 // WebTransport.createUnidirectionalStream() and calls callback with its
 // writable side. options can be NULL.
-EMSCRIPTEN_RESULT emscripten_webtransport_create_unidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportSendStreamOptions *options, void *userData, em_webtransport_stream_callback_func callback);
+EMSCRIPTEN_RESULT emscripten_webtransport_create_unidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportSendOptions *options, void *userData, em_webtransport_stream_callback_func callback);
 
 // Reads the next stream from WebTransport.incomingUnidirectionalStreams, a
 // stream opened by the server, and calls callback with its readable side.
@@ -203,7 +204,7 @@ typedef void (*em_webtransport_bidirectional_stream_callback_func)(EMSCRIPTEN_WE
 
 // Opens a bidirectional stream to the server with
 // WebTransport.createBidirectionalStream(). options can be NULL.
-EMSCRIPTEN_RESULT emscripten_webtransport_create_bidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportSendStreamOptions *options, void *userData, em_webtransport_bidirectional_stream_callback_func callback);
+EMSCRIPTEN_RESULT emscripten_webtransport_create_bidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportSendOptions *options, void *userData, em_webtransport_bidirectional_stream_callback_func callback);
 
 // Reads the next stream from WebTransport.incomingBidirectionalStreams, a
 // bidirectional stream opened by the server.
@@ -245,6 +246,40 @@ EMSCRIPTEN_RESULT emscripten_webtransport_stream_cancel(EMSCRIPTEN_WEBTRANSPORT_
 // Releases the stream handle. Pending callbacks of the stream are not called
 // anymore. This does not close the stream.
 EMSCRIPTEN_RESULT emscripten_webtransport_stream_delete(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream);
+
+// Datagrams
+//
+// Datagrams are unreliable. They can get lost or arrive out of order. Each
+// read returns one datagram and each write sends one.
+
+// Returns a readable stream handle for WebTransport.datagrams.readable, or a
+// negative EMSCRIPTEN_RESULT on failure. Every call returns the same handle
+// until it is deleted. A read returns one datagram. If the datagram does not
+// fit into the buffer, the rest of it is discarded. Pending reads finish with
+// done set once the transport is closed.
+EMSCRIPTEN_WEBTRANSPORT_STREAM_T emscripten_webtransport_get_datagrams_readable(EMSCRIPTEN_WEBTRANSPORT_T transport);
+
+// Creates a writable stream handle with
+// WebTransport.datagrams.createWritable(), or returns a negative
+// EMSCRIPTEN_RESULT on failure. Each write sends one datagram, which is dropped
+// if it is larger than the maximum datagram size. options can be NULL.
+// If the browser lacks createWritable(), the deprecated
+// WebTransport.datagrams.writable is used instead. It ignores options and only
+// one handle can write to it at a time.
+EMSCRIPTEN_WEBTRANSPORT_STREAM_T emscripten_webtransport_create_datagrams_writable(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportSendOptions *options);
+
+// Returns the WebTransport.datagrams.maxDatagramSize field into
+// maxDatagramSize, the largest datagram in bytes that can be written.
+EMSCRIPTEN_RESULT emscripten_webtransport_get_max_datagram_size(EMSCRIPTEN_WEBTRANSPORT_T transport, size_t * _Nonnull maxDatagramSize);
+
+// Get and set the WebTransport.datagrams.incomingMaxAge and outgoingMaxAge
+// fields, the time in milliseconds after which queued datagrams are dropped.
+// INFINITY means that there is no maximum age. Setting a negative value
+// returns EMSCRIPTEN_RESULT_INVALID_PARAM.
+EMSCRIPTEN_RESULT emscripten_webtransport_get_incoming_max_age(EMSCRIPTEN_WEBTRANSPORT_T transport, double * _Nonnull maxAge);
+EMSCRIPTEN_RESULT emscripten_webtransport_set_incoming_max_age(EMSCRIPTEN_WEBTRANSPORT_T transport, double maxAge);
+EMSCRIPTEN_RESULT emscripten_webtransport_get_outgoing_max_age(EMSCRIPTEN_WEBTRANSPORT_T transport, double * _Nonnull maxAge);
+EMSCRIPTEN_RESULT emscripten_webtransport_set_outgoing_max_age(EMSCRIPTEN_WEBTRANSPORT_T transport, double maxAge);
 
 // Closes and deletes all transports. You can call this at application exit to
 // tear down all connections.

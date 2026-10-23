@@ -953,7 +953,7 @@
             "serverCertificateHashes": 16,
             "serverCertificateHashesCount": 20
         },
-        "WebTransportSendStreamOptions": {
+        "WebTransportSendOptions": {
             "__size__": 8,
             "sendOrder": 0
         },

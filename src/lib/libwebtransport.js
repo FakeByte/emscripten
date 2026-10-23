@@ -12,10 +12,12 @@ var LibraryWebTransport = {
   $webTransports__deps: ['$HandleAllocator'],
   $webTransports: 'new HandleAllocator();',
 
-  // Maps handles to stream records: {transport, readable, writable, reader,
-  // writer, buffer, deleted}. A record wraps either a ReadableStream or a
-  // WritableStream of `transport` (a transport record). The reader or writer
-  // is acquired on first use, `buffer` is an ArrayBuffer reused for reads.
+  // Maps handles to stream records: {id, transport, readable, writable,
+  // datagrams, reader, writer, buffer, deleted}. A record wraps either a
+  // ReadableStream or a WritableStream of `transport` (a transport record).
+  // `datagrams` is true for the readable stream of datagrams. The reader or
+  // writer is acquired on first use and `buffer` is an ArrayBuffer reused for
+  // reads.
   $webTransportStreams__deps: ['$HandleAllocator'],
   $webTransportStreams: 'new HandleAllocator();',
 
@@ -30,9 +32,10 @@ var LibraryWebTransport = {
     },
 
     allocateStream(transport, stream) {
-      var streamId = webTransportStreams.allocate({transport, ...stream});
-      transport.streams.add(streamId);
-      return streamId;
+      var record = {transport, ...stream};
+      record.id = webTransportStreams.allocate(record);
+      transport.streams.add(record.id);
+      return record.id;
     },
 
     // Returns the handles of the readable and the writable side of a
@@ -56,8 +59,28 @@ var LibraryWebTransport = {
       webTransportStreams.free(streamId);
     },
 
+    // Datagrams are read with a default reader since each read has to return
+    // exactly one datagram. Streams of bytes use a BYOB reader so that a read
+    // never returns more than fits into the caller's buffer.
     getReader(stream) {
-      return stream.reader ??= stream.readable.getReader({mode: 'byob'});
+      return stream.reader ??= stream.readable.getReader(stream.datagrams ? undefined : {mode: 'byob'});
+    },
+
+    // Reads up to `length` bytes. A BYOB read cannot fill the Wasm memory
+    // directly since it transfers the buffer it reads into, so it reads into a
+    // JS buffer which is then copied and reused by the next read.
+    readBytes(stream, length) {
+      var scratch = stream.buffer?.byteLength >= length ? stream.buffer : new ArrayBuffer(length);
+      stream.buffer = null;
+      return WT.attempt(() => WT.getReader(stream).read(new Uint8Array(scratch, 0, length)));
+    },
+
+    // Reads the next datagram. Firefox does not finish pending datagram reads
+    // when the transport closes, so the read also ends once the closed promise
+    // of the transport settles.
+    readDatagram(stream) {
+      var done = () => ({done: true});
+      return Promise.race([WT.attempt(() => WT.getReader(stream).read()), stream.transport.transport.closed.then(done, done)]);
     },
 
     getWriter(stream) {
@@ -70,11 +93,31 @@ var LibraryWebTransport = {
       return new Promise((resolve) => resolve(fn()));
     },
 
-    // Converts a WebTransportSendStreamOptions struct to the JS dictionary.
-    readSendStreamOptions(ptr) {
+    // Writes the datagrams field `name` to `ptr`. The spec uses null for no
+    // maximum age while Firefox uses Infinity. Both are returned as Infinity.
+    getMaxAge(transportId, name, ptr) {
+      var record = WT.getTransport(transportId);
+      if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+      {{{ makeSetValue('ptr', 0, 'record.transport.datagrams[name] ?? Infinity', 'double') }}};
+      return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+    },
+
+    setMaxAge(transportId, name, maxAge) {
+      var record = WT.getTransport(transportId);
+      if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+      try {
+        record.transport.datagrams[name] = maxAge;
+      } catch (e) {
+        return WT.resultFromException(e);
+      }
+      return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+    },
+
+    // Converts a WebTransportSendOptions struct to the JS dictionary.
+    readSendOptions(ptr) {
       if (!ptr) return undefined;
       return {
-        sendOrder: {{{ makeGetValue('ptr', C_STRUCTS.WebTransportSendStreamOptions.sendOrder, 'i53') }}},
+        sendOrder: {{{ makeGetValue('ptr', C_STRUCTS.WebTransportSendOptions.sendOrder, 'i53') }}},
       };
     },
 
@@ -302,7 +345,7 @@ var LibraryWebTransport = {
     var record = WT.getTransport(transportId);
     if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
     if (!callback) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
-    var promise = WT.attempt(() => record.transport.createUnidirectionalStream(WT.readSendStreamOptions(options)));
+    var promise = WT.attempt(() => record.transport.createUnidirectionalStream(WT.readSendOptions(options)));
     WT.onSettled(promise, () => !record.deleted, (writable, error) => {
       var streamId = error ? 0 : WT.allocateStream(record, {writable});
       {{{ makeDynCall('viipp', 'callback') }}}(transportId, streamId, error, userData);
@@ -329,7 +372,7 @@ var LibraryWebTransport = {
     var record = WT.getTransport(transportId);
     if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
     if (!callback) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
-    var promise = WT.attempt(() => record.transport.createBidirectionalStream(WT.readSendStreamOptions(options)));
+    var promise = WT.attempt(() => record.transport.createBidirectionalStream(WT.readSendOptions(options)));
     WT.onSettled(promise, () => !record.deleted, (stream, error) => {
       var [readableId, writableId] = stream ? WT.allocateBidirectionalStream(record, stream) : [0, 0];
       {{{ makeDynCall('viiipp', 'callback') }}}(transportId, readableId, writableId, error, userData);
@@ -357,19 +400,17 @@ var LibraryWebTransport = {
     if (!stream) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
     if (!stream.readable) return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
     if (!buffer || !length || !callback) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
-    // A BYOB read cannot fill the Wasm memory directly since it transfers the
-    // buffer it reads into, so it reads into a JS buffer which is then copied
-    // and reused by the next read.
-    var scratch = stream.buffer?.byteLength >= length ? stream.buffer : new ArrayBuffer(length);
-    stream.buffer = null;
-    var promise = WT.attempt(() => WT.getReader(stream).read(new Uint8Array(scratch, 0, length)));
+    var promise = stream.datagrams ? WT.readDatagram(stream) : WT.readBytes(stream, length);
     WT.onSettled(promise, () => !stream.deleted, (result, error) => {
       var numBytes = 0;
       // A read that was pending when the stream got canceled has no value.
       if (result?.value) {
-        stream.buffer = result.value.buffer;
-        numBytes = result.value.length;
-        HEAPU8.set(result.value, buffer);
+        if (!stream.datagrams) stream.buffer = result.value.buffer;
+        // Only a datagram can be larger than the buffer. The rest of it is
+        // discarded.
+        var data = result.value.subarray(0, length);
+        HEAPU8.set(data, buffer);
+        numBytes = data.length;
       }
       {{{ makeDynCall('vipipp', 'callback') }}}(streamId, numBytes, !!result?.done, error, userData);
     });
@@ -434,6 +475,58 @@ var LibraryWebTransport = {
     WT.deleteStream(streamId);
     return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
   },
+
+  emscripten_webtransport_get_datagrams_readable__deps: ['$WT'],
+  emscripten_webtransport_get_datagrams_readable__proxy: 'sync',
+  emscripten_webtransport_get_datagrams_readable: (transportId) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    var stream = record.datagramsReadable;
+    if (!stream || stream.deleted) {
+      var streamId = WT.allocateStream(record, {readable: record.transport.datagrams.readable, datagrams: true});
+      stream = record.datagramsReadable = webTransportStreams.get(streamId);
+    }
+    return stream.id;
+  },
+
+  emscripten_webtransport_create_datagrams_writable__deps: ['$WT'],
+  emscripten_webtransport_create_datagrams_writable__proxy: 'sync',
+  emscripten_webtransport_create_datagrams_writable: (transportId, options) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    var datagrams = record.transport.datagrams;
+    try {
+      var writable = datagrams.createWritable ? datagrams.createWritable(WT.readSendOptions(options)) : datagrams.writable;
+    } catch (e) {
+      return WT.resultFromException(e);
+    }
+    return WT.allocateStream(record, {writable});
+  },
+
+  emscripten_webtransport_get_max_datagram_size__deps: ['$WT'],
+  emscripten_webtransport_get_max_datagram_size__proxy: 'sync',
+  emscripten_webtransport_get_max_datagram_size: (transportId, maxDatagramSize) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    {{{ makeSetValue('maxDatagramSize', 0, 'record.transport.datagrams.maxDatagramSize', '*') }}};
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_get_incoming_max_age__deps: ['$WT'],
+  emscripten_webtransport_get_incoming_max_age__proxy: 'sync',
+  emscripten_webtransport_get_incoming_max_age: (transportId, maxAge) => WT.getMaxAge(transportId, 'incomingMaxAge', maxAge),
+
+  emscripten_webtransport_set_incoming_max_age__deps: ['$WT'],
+  emscripten_webtransport_set_incoming_max_age__proxy: 'sync',
+  emscripten_webtransport_set_incoming_max_age: (transportId, maxAge) => WT.setMaxAge(transportId, 'incomingMaxAge', maxAge),
+
+  emscripten_webtransport_get_outgoing_max_age__deps: ['$WT'],
+  emscripten_webtransport_get_outgoing_max_age__proxy: 'sync',
+  emscripten_webtransport_get_outgoing_max_age: (transportId, maxAge) => WT.getMaxAge(transportId, 'outgoingMaxAge', maxAge),
+
+  emscripten_webtransport_set_outgoing_max_age__deps: ['$WT'],
+  emscripten_webtransport_set_outgoing_max_age__proxy: 'sync',
+  emscripten_webtransport_set_outgoing_max_age: (transportId, maxAge) => WT.setMaxAge(transportId, 'outgoingMaxAge', maxAge),
 
   emscripten_webtransport_deinitialize__deps: ['$webTransports', 'emscripten_webtransport_delete'],
   emscripten_webtransport_deinitialize__proxy: 'sync',

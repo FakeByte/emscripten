@@ -32,12 +32,12 @@ extern "C" {
 // Handle to a WebTransport object. Valid handles are > 0.
 typedef int EMSCRIPTEN_WEBTRANSPORT_T;
 
-// Handle to a stream of a transport, valid handles are > 0. A stream handle
+// Handle to a stream of a transport. Valid handles are > 0. A stream handle
 // refers to either the readable side (a WebTransportReceiveStream) or the
 // writable side (a WebTransportSendStream) of a WebTransport stream.
 typedef int EMSCRIPTEN_WEBTRANSPORT_STREAM_T;
 
-// WebTransportError.source
+// Values of the WebTransportError.source field.
 typedef enum WebTransportErrorSource {
   // The error is not a WebTransportError (e.g. an InvalidStateError
   // DOMException or a TypeError), so it has no source.
@@ -46,8 +46,8 @@ typedef enum WebTransportErrorSource {
   WEBTRANSPORT_ERROR_SOURCE_SESSION = 2,
 } WebTransportErrorSource;
 
-// The reason an asynchronous operation failed: a WebTransportError, a
-// DOMException or any other JS error the browser rejected the promise with.
+// Describes why an asynchronous operation failed. The browser rejects promises
+// with a WebTransportError, a DOMException or another JS error.
 typedef struct WebTransportError {
   // The error name, e.g. "WebTransportError" or "InvalidStateError".
   const char *name;
@@ -65,14 +65,14 @@ typedef struct WebTransportHash {
   size_t valueLength;
 } WebTransportHash;
 
-// WebTransport.congestionControl
+// Values of the WebTransport.congestionControl field.
 typedef enum WebTransportCongestionControl {
   WEBTRANSPORT_CONGESTION_CONTROL_DEFAULT = 0,
   WEBTRANSPORT_CONGESTION_CONTROL_THROUGHPUT = 1,
   WEBTRANSPORT_CONGESTION_CONTROL_LOW_LATENCY = 2,
 } WebTransportCongestionControl;
 
-// WebTransport.reliability
+// Values of the WebTransport.reliability field.
 typedef enum WebTransportReliabilityMode {
   // The connection is not established yet.
   WEBTRANSPORT_RELIABILITY_PENDING = 0,
@@ -90,7 +90,8 @@ typedef struct WebTransportOptions {
   // A hint whether to tune congestion control for throughput or latency.
   WebTransportCongestionControl congestionControl;
   // Application protocols to offer to the server, in order of preference. The
-  // one the server selects is returned by emscripten_webtransport_get_protocol().
+  // one the server selects is returned by
+  // emscripten_webtransport_get_protocol().
   const char *const *protocols;
   size_t protocolsCount;
   // Certificates to accept instead of using the Web PKI. Can be NULL. Not
@@ -114,8 +115,8 @@ typedef struct WebTransportSendStreamOptions {
 // Returns true if the browser supports WebTransport.
 bool emscripten_webtransport_is_supported(void);
 
-// WebTransport.supportsReliableOnly: returns true if the browser supports
-// sessions over reliable-only transports such as HTTP/2.
+// Returns the static WebTransport.supportsReliableOnly field, which is true if
+// the browser supports sessions over reliable-only transports such as HTTP/2.
 bool emscripten_webtransport_supports_reliable_only(void);
 
 // Creates a new WebTransport and starts connecting it to the given url, which
@@ -127,16 +128,17 @@ bool emscripten_webtransport_supports_reliable_only(void);
 // options are invalid.
 EMSCRIPTEN_WEBTRANSPORT_T emscripten_webtransport_new(const char *url, const WebTransportOptions *options);
 
-// WebTransport.ready: called once the connection is established (error is
-// NULL), or with the error the connection failed with.
+// Called when the WebTransport.ready promise settles. error is NULL once the
+// connection is established, otherwise it holds the reason the connection
+// failed.
 typedef void (*em_webtransport_ready_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportError *error, void *userData);
-// WebTransport.draining: called once the server asks to wind down the session
-// before closing it.
+// Called when the WebTransport.draining promise fulfills, which happens when
+// the server asks to wind down the session before closing it.
 typedef void (*em_webtransport_draining_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData);
-// WebTransport.closed: called once the transport is closed. On a graceful
-// close closeInfo holds the code and reason and error is NULL, after an abrupt
-// close (e.g. a network failure or a failed connection attempt) closeInfo is
-// NULL and error says why.
+// Called when the WebTransport.closed promise settles. After a graceful close
+// closeInfo holds the close code and reason and error is NULL. After an abrupt
+// close, e.g. due to a network failure or a failed connection attempt,
+// closeInfo is NULL and error holds the reason.
 typedef void (*em_webtransport_closed_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportCloseInfo *closeInfo, const WebTransportError *error, void *userData);
 
 // Sets the callback that is called once the corresponding promise of the
@@ -149,23 +151,25 @@ EMSCRIPTEN_RESULT emscripten_webtransport_set_onclosed_callback(EMSCRIPTEN_WEBTR
 // WebTransport.draining.
 EMSCRIPTEN_RESULT emscripten_webtransport_set_ondraining_callback(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData, em_webtransport_draining_callback_func callback);
 
-// WebTransport.reliability
+// Returns the WebTransport.reliability field into reliability.
 EMSCRIPTEN_RESULT emscripten_webtransport_get_reliability(EMSCRIPTEN_WEBTRANSPORT_T transport, WebTransportReliabilityMode * _Nonnull reliability);
 
-// WebTransport.congestionControl: the congestion control preference the
-// browser applies, which can differ from the requested one.
+// Returns the WebTransport.congestionControl field into congestionControl. This
+// is the congestion control preference the browser applies, which can differ
+// from the requested one.
 EMSCRIPTEN_RESULT emscripten_webtransport_get_congestion_control(EMSCRIPTEN_WEBTRANSPORT_T transport, WebTransportCongestionControl * _Nonnull congestionControl);
 
-// WebTransport.protocol: writes the protocol selected by the server as a UTF-8
-// string to protocol, truncated to protocolLength bytes including the null
-// terminator. The string is empty if the server selected none, or if the
+// Writes the WebTransport.protocol field, the protocol selected by the server,
+// as a UTF-8 string to the memory area pointed by protocol. If the string does
+// not fit into protocolLength bytes including the null terminator, it is
+// truncated. The string is empty if the server selected none, or if the
 // connection is not established yet.
 EMSCRIPTEN_RESULT emscripten_webtransport_get_protocol(EMSCRIPTEN_WEBTRANSPORT_T transport, char * _Nonnull protocol, int protocolLength);
 // Returns the buffer size emscripten_webtransport_get_protocol() needs,
 // including the null terminator.
 EMSCRIPTEN_RESULT emscripten_webtransport_get_protocol_length(EMSCRIPTEN_WEBTRANSPORT_T transport, int * _Nonnull protocolLength);
 
-// WebTransport.close(): closes the session. closeInfo can be NULL to close
+// Closes the session with WebTransport.close(). closeInfo can be NULL to close
 // with code 0 and an empty reason.
 EMSCRIPTEN_RESULT emscripten_webtransport_close(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportCloseInfo *closeInfo);
 
@@ -184,8 +188,9 @@ EMSCRIPTEN_RESULT emscripten_webtransport_delete(EMSCRIPTEN_WEBTRANSPORT_T trans
 // transport is closed and no more streams arrive.
 typedef void (*em_webtransport_stream_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData);
 
-// WebTransport.createUnidirectionalStream(): opens a stream to the server and
-// calls callback with its writable side. options can be NULL.
+// Opens a unidirectional stream to the server with
+// WebTransport.createUnidirectionalStream() and calls callback with its
+// writable side. options can be NULL.
 EMSCRIPTEN_RESULT emscripten_webtransport_create_unidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportSendStreamOptions *options, void *userData, em_webtransport_stream_callback_func callback);
 
 // Reads the next stream from WebTransport.incomingUnidirectionalStreams, a
@@ -196,8 +201,8 @@ EMSCRIPTEN_RESULT emscripten_webtransport_read_incoming_unidirectional_stream(EM
 // stream, or with both 0 like em_webtransport_stream_callback_func.
 typedef void (*em_webtransport_bidirectional_stream_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, EMSCRIPTEN_WEBTRANSPORT_STREAM_T readable, EMSCRIPTEN_WEBTRANSPORT_STREAM_T writable, const WebTransportError *error, void *userData);
 
-// WebTransport.createBidirectionalStream(): opens a bidirectional stream to the
-// server. options can be NULL.
+// Opens a bidirectional stream to the server with
+// WebTransport.createBidirectionalStream(). options can be NULL.
 EMSCRIPTEN_RESULT emscripten_webtransport_create_bidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportSendStreamOptions *options, void *userData, em_webtransport_bidirectional_stream_callback_func callback);
 
 // Reads the next stream from WebTransport.incomingBidirectionalStreams, a
@@ -208,7 +213,7 @@ EMSCRIPTEN_RESULT emscripten_webtransport_read_incoming_bidirectional_stream(EMS
 // buffer passed to emscripten_webtransport_stream_read(). done is true once
 // the end of the stream is reached, in which case numBytes is 0.
 typedef void (*em_webtransport_read_callback_func)(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, size_t numBytes, bool done, const WebTransportError *error, void *userData);
-// Called once a write or close finished, error is NULL on success.
+// Called once a write or close finished. error is NULL on success.
 typedef void (*em_webtransport_stream_result_callback_func)(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData);
 
 // Reads up to bufferLength bytes from a readable stream into buffer, which has

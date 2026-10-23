@@ -1,6 +1,6 @@
 // Tests the WebTransport bindings against a public WebTransport echo server.
 //
-// The tests run one after another: each test starts some asynchronous
+// The tests run one after another. Each test starts some asynchronous
 // operations and calls next_test() from a callback once it is done.
 
 #include <stdio.h>
@@ -48,7 +48,7 @@ static void print_error(const char *what, const WebTransportError *error) {
   printf("  %s: %s (%s), source=%d, streamErrorCode=%d\n", what, error->name, error->message, error->source, error->streamErrorCode);
 }
 
-// Test runner
+// Test runner.
 
 typedef struct Test {
   const char *name;
@@ -90,7 +90,7 @@ static void fail_on_closed(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTranspo
   emscripten_force_exit(1);
 }
 
-// Connecting that fails: the ready and closed callbacks both receive an error.
+// When connecting fails, the ready and closed callbacks both receive an error.
 
 static int failed_callbacks;
 
@@ -127,7 +127,7 @@ static void expect_connection_failure(EMSCRIPTEN_WEBTRANSPORT_T transport) {
   CHECK_SUCCESS(emscripten_webtransport_set_onclosed_callback(transport, (void *)0x5678, on_failed_closed));
 }
 
-// Tests
+// Tests.
 
 static void test_is_supported(void) {
   CHECK(emscripten_webtransport_is_supported());
@@ -359,7 +359,7 @@ static void test_connection_properties(void) {
   CHECK_SUCCESS(emscripten_webtransport_set_onready_callback(t, NULL, on_properties_ready));
 }
 
-// Helpers for the stream tests
+// Helpers for the stream tests.
 
 // Reads a stream to its end in reads of chunkSize bytes, then calls on_done.
 typedef struct StreamReader {
@@ -424,14 +424,14 @@ static void fail_on_bidi_stream(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANS
   emscripten_force_exit(1);
 }
 
-// Checks that calls a writable stream does not support fail.
+// Checks that reading functions fail on a writable stream.
 static void check_not_readable(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream) {
   char buffer[4];
   CHECK_RESULT(emscripten_webtransport_stream_read(stream, buffer, sizeof(buffer), NULL, fail_on_read), EMSCRIPTEN_RESULT_NOT_SUPPORTED);
   CHECK_RESULT(emscripten_webtransport_stream_cancel(stream, 0), EMSCRIPTEN_RESULT_NOT_SUPPORTED);
 }
 
-// Checks that calls a readable stream does not support fail.
+// Checks that writing functions fail on a readable stream.
 static void check_not_writable(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream) {
   CHECK_RESULT(emscripten_webtransport_stream_write(stream, "x", 1, NULL, NULL), EMSCRIPTEN_RESULT_NOT_SUPPORTED);
   CHECK_RESULT(emscripten_webtransport_stream_close(stream, NULL, NULL), EMSCRIPTEN_RESULT_NOT_SUPPORTED);
@@ -538,7 +538,7 @@ static void on_uni_created(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_
 }
 
 static void test_unidirectional_stream(void) {
-  // Callbacks of the incoming stream, the second write, the close.
+  // Wait for the incoming stream, the second write and the close.
   pending_steps = 3;
   // Waiting for an incoming stream can start before there is one.
   CHECK_SUCCESS(emscripten_webtransport_read_incoming_unidirectional_stream(shared, (void *)0x77, on_incoming_uni_stream));
@@ -582,9 +582,9 @@ static void test_large_unidirectional_stream(void) {
 }
 
 // Echoes a message on a bidirectional stream. Before that, a read on another
-// bidirectional stream is left pending and its handle deleted: by the time the
-// second echo arrives the first one has arrived too, without calling the
-// deleted stream's read callback.
+// bidirectional stream is left pending and its handle is deleted. By the time
+// the second echo arrives the first one has arrived too, which must not call
+// the deleted stream's read callback.
 
 static const char bidi_message[] = "Hello, bidirectional world!";
 static EMSCRIPTEN_WEBTRANSPORT_STREAM_T bidi_writable;
@@ -635,7 +635,7 @@ static void on_abandoned_bidi_created(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WE
 }
 
 static void test_bidirectional_stream(void) {
-  // Callbacks of the end of the echo and of the close.
+  // Wait for the end of the echo and for the close.
   pending_steps = 2;
   CHECK_SUCCESS(emscripten_webtransport_create_bidirectional_stream(shared, NULL, NULL, on_abandoned_bidi_created));
 }

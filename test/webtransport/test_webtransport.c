@@ -256,6 +256,109 @@ static void test_delete_removes_callbacks(void) {
   CHECK_SUCCESS(emscripten_webtransport_set_onready_callback(other, NULL, on_other_ready));
 }
 
+static void test_supports_reliable_only(void) {
+  bool supported = emscripten_webtransport_supports_reliable_only();
+  printf("  supportsReliableOnly: %d\n", supported);
+  CHECK(supported == EM_ASM_INT(return !!WebTransport.supportsReliableOnly));
+  next_test();
+}
+
+static void test_invalid_options(void) {
+  WebTransportOptions options = {.congestionControl = (WebTransportCongestionControl)7};
+  CHECK_RESULT(emscripten_webtransport_new(ECHO_SERVER_URL, &options), EMSCRIPTEN_RESULT_INVALID_PARAM);
+
+  const char *duplicate_protocols[] = {"echo", "echo"};
+  options = (WebTransportOptions){.protocols = duplicate_protocols, .protocolsCount = 2};
+  CHECK_RESULT(emscripten_webtransport_new(ECHO_SERVER_URL, &options), EMSCRIPTEN_RESULT_INVALID_PARAM);
+
+  const char *empty_protocol[] = {""};
+  options = (WebTransportOptions){.protocols = empty_protocol, .protocolsCount = 1};
+  CHECK_RESULT(emscripten_webtransport_new(ECHO_SERVER_URL, &options), EMSCRIPTEN_RESULT_INVALID_PARAM);
+
+  // Certificate hashes require a dedicated connection.
+  static const uint8_t zeros[32];
+  WebTransportHash hash = {.algorithm = "sha-256", .value = zeros, .valueLength = sizeof(zeros)};
+  options = (WebTransportOptions){.allowPooling = true, .serverCertificateHashes = &hash, .serverCertificateHashesCount = 1};
+  CHECK_RESULT(emscripten_webtransport_new(ECHO_SERVER_URL, &options), EMSCRIPTEN_RESULT_NOT_SUPPORTED);
+
+  WebTransportReliabilityMode reliability;
+  WebTransportCongestionControl congestionControl;
+  int length;
+  char protocol[16];
+  CHECK_RESULT(emscripten_webtransport_set_ondraining_callback(12345, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_get_reliability(12345, &reliability), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_get_congestion_control(12345, &congestionControl), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_get_protocol(12345, protocol, sizeof(protocol)), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_get_protocol_length(12345, &length), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  next_test();
+}
+
+// Connects with all options set and checks the properties of the connection.
+
+static void fail_on_draining(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData) {
+  printf("FAIL [%s] unexpected draining callback for transport %d\n", current_test_name, transport);
+  emscripten_force_exit(1);
+}
+
+static void on_properties_closed(EMSCRIPTEN_WEBTRANSPORT_T t, const WebTransportCloseInfo *closeInfo, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  CHECK_SUCCESS(emscripten_webtransport_delete(t));
+  next_test();
+}
+
+static void on_properties_ready(EMSCRIPTEN_WEBTRANSPORT_T t, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+
+  WebTransportReliabilityMode reliability;
+  CHECK_SUCCESS(emscripten_webtransport_get_reliability(t, &reliability));
+  printf("  reliability: %d\n", reliability);
+  // The echo server is reached over HTTP/3.
+  CHECK(reliability == WEBTRANSPORT_RELIABILITY_SUPPORTS_UNRELIABLE);
+
+  // The browser may not honor the requested low-latency preference.
+  WebTransportCongestionControl congestionControl;
+  CHECK_SUCCESS(emscripten_webtransport_get_congestion_control(t, &congestionControl));
+  printf("  congestionControl: %d\n", congestionControl);
+  CHECK(congestionControl == WEBTRANSPORT_CONGESTION_CONTROL_DEFAULT || congestionControl == WEBTRANSPORT_CONGESTION_CONTROL_LOW_LATENCY);
+
+  // The echo server does not select any of the offered protocols.
+  int length = 0;
+  CHECK_SUCCESS(emscripten_webtransport_get_protocol_length(t, &length));
+  CHECK(length == 1);
+  char protocol[16] = "garbage";
+  CHECK_SUCCESS(emscripten_webtransport_get_protocol(t, protocol, sizeof(protocol)));
+  CHECK(strcmp(protocol, "") == 0);
+  CHECK_RESULT(emscripten_webtransport_get_protocol(t, NULL, 0), EMSCRIPTEN_RESULT_INVALID_PARAM);
+  CHECK_RESULT(emscripten_webtransport_get_protocol_length(t, NULL), EMSCRIPTEN_RESULT_INVALID_PARAM);
+
+  CHECK_SUCCESS(emscripten_webtransport_set_onclosed_callback(t, NULL, on_properties_closed));
+  CHECK_SUCCESS(emscripten_webtransport_close(t, NULL));
+}
+
+static void test_connection_properties(void) {
+  const char *protocols[] = {"echo-v2", "echo-v1"};
+  WebTransportOptions options = {
+    .allowPooling = false,
+    .requireUnreliable = true,
+    .congestionControl = WEBTRANSPORT_CONGESTION_CONTROL_LOW_LATENCY,
+    .protocols = protocols,
+    .protocolsCount = 2,
+  };
+  EMSCRIPTEN_WEBTRANSPORT_T t = emscripten_webtransport_new(ECHO_SERVER_URL, &options);
+  CHECK(t > 0);
+
+  WebTransportReliabilityMode reliability;
+  CHECK_SUCCESS(emscripten_webtransport_get_reliability(t, &reliability));
+  CHECK(reliability == WEBTRANSPORT_RELIABILITY_PENDING);
+  int length = 0;
+  CHECK_SUCCESS(emscripten_webtransport_get_protocol_length(t, &length));
+  CHECK(length == 1);
+
+  // The echo server never asks to drain the session.
+  CHECK_SUCCESS(emscripten_webtransport_set_ondraining_callback(t, NULL, fail_on_draining));
+  CHECK_SUCCESS(emscripten_webtransport_set_onready_callback(t, NULL, on_properties_ready));
+}
+
 static void test_deinitialize(void) {
   EMSCRIPTEN_WEBTRANSPORT_T a = emscripten_webtransport_new(ECHO_SERVER_URL, NULL);
   EMSCRIPTEN_WEBTRANSPORT_T b = emscripten_webtransport_new(ECHO_SERVER_URL, NULL);
@@ -274,6 +377,9 @@ static const Test all_tests[] = {
   {"certificate_hash_mismatch", test_certificate_hash_mismatch},
   {"close_while_connecting", test_close_while_connecting},
   {"connect_and_close", test_connect_and_close},
+  {"supports_reliable_only", test_supports_reliable_only},
+  {"invalid_options", test_invalid_options},
+  {"connection_properties", test_connection_properties},
   {"delete_removes_callbacks", test_delete_removes_callbacks},
   {"deinitialize", test_deinitialize},
 };

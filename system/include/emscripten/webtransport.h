@@ -60,10 +60,36 @@ typedef struct WebTransportHash {
   size_t valueLength;
 } WebTransportHash;
 
+// WebTransport.congestionControl
+typedef enum WebTransportCongestionControl {
+  WEBTRANSPORT_CONGESTION_CONTROL_DEFAULT = 0,
+  WEBTRANSPORT_CONGESTION_CONTROL_THROUGHPUT = 1,
+  WEBTRANSPORT_CONGESTION_CONTROL_LOW_LATENCY = 2,
+} WebTransportCongestionControl;
+
+// WebTransport.reliability
+typedef enum WebTransportReliabilityMode {
+  // The connection is not established yet.
+  WEBTRANSPORT_RELIABILITY_PENDING = 0,
+  WEBTRANSPORT_RELIABILITY_RELIABLE_ONLY = 1,
+  WEBTRANSPORT_RELIABILITY_SUPPORTS_UNRELIABLE = 2,
+} WebTransportReliabilityMode;
+
 // Options for emscripten_webtransport_new(). Zero-initialize the struct to
 // get the defaults of the WebTransport() constructor.
 typedef struct WebTransportOptions {
-  // Certificates to accept instead of using the Web PKI. Can be NULL.
+  // Allows sharing the network connection with other HTTP/3 sessions.
+  bool allowPooling;
+  // Fails instead of falling back to HTTP/2 if HTTP/3 is not possible.
+  bool requireUnreliable;
+  // A hint whether to tune congestion control for throughput or latency.
+  WebTransportCongestionControl congestionControl;
+  // Application protocols to offer to the server, in order of preference. The
+  // one the server selects is returned by emscripten_webtransport_get_protocol().
+  const char *const *protocols;
+  size_t protocolsCount;
+  // Certificates to accept instead of using the Web PKI. Can be NULL. Not
+  // supported together with allowPooling.
   const WebTransportHash *serverCertificateHashes;
   size_t serverCertificateHashesCount;
 } WebTransportOptions;
@@ -77,6 +103,10 @@ typedef struct WebTransportCloseInfo {
 // Returns true if the browser supports WebTransport.
 bool emscripten_webtransport_is_supported(void);
 
+// WebTransport.supportsReliableOnly: returns true if the browser supports
+// sessions over reliable-only transports such as HTTP/2.
+bool emscripten_webtransport_supports_reliable_only(void);
+
 // Creates a new WebTransport and starts connecting it to the given url, which
 // must be an https url with an explicit port. options can be NULL to use the
 // defaults.
@@ -89,6 +119,9 @@ EMSCRIPTEN_WEBTRANSPORT_T emscripten_webtransport_new(const char *url, const Web
 // WebTransport.ready: called once the connection is established (error is
 // NULL), or with the error the connection failed with.
 typedef void (*em_webtransport_ready_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportError *error, void *userData);
+// WebTransport.draining: called once the server asks to wind down the session
+// before closing it.
+typedef void (*em_webtransport_draining_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData);
 // WebTransport.closed: called once the transport is closed. On a graceful
 // close closeInfo holds the code and reason and error is NULL, after an abrupt
 // close (e.g. a network failure or a failed connection attempt) closeInfo is
@@ -101,6 +134,25 @@ typedef void (*em_webtransport_closed_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T t
 // one, pass NULL to remove it.
 EMSCRIPTEN_RESULT emscripten_webtransport_set_onready_callback(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData, em_webtransport_ready_callback_func callback);
 EMSCRIPTEN_RESULT emscripten_webtransport_set_onclosed_callback(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData, em_webtransport_closed_callback_func callback);
+// Returns EMSCRIPTEN_RESULT_NOT_SUPPORTED if the browser has no
+// WebTransport.draining.
+EMSCRIPTEN_RESULT emscripten_webtransport_set_ondraining_callback(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData, em_webtransport_draining_callback_func callback);
+
+// WebTransport.reliability
+EMSCRIPTEN_RESULT emscripten_webtransport_get_reliability(EMSCRIPTEN_WEBTRANSPORT_T transport, WebTransportReliabilityMode * _Nonnull reliability);
+
+// WebTransport.congestionControl: the congestion control preference the
+// browser applies, which can differ from the requested one.
+EMSCRIPTEN_RESULT emscripten_webtransport_get_congestion_control(EMSCRIPTEN_WEBTRANSPORT_T transport, WebTransportCongestionControl * _Nonnull congestionControl);
+
+// WebTransport.protocol: writes the protocol selected by the server as a UTF-8
+// string to protocol, truncated to protocolLength bytes including the null
+// terminator. The string is empty if the server selected none, or if the
+// connection is not established yet.
+EMSCRIPTEN_RESULT emscripten_webtransport_get_protocol(EMSCRIPTEN_WEBTRANSPORT_T transport, char * _Nonnull protocol, int protocolLength);
+// Returns the buffer size emscripten_webtransport_get_protocol() needs,
+// including the null terminator.
+EMSCRIPTEN_RESULT emscripten_webtransport_get_protocol_length(EMSCRIPTEN_WEBTRANSPORT_T transport, int * _Nonnull protocolLength);
 
 // WebTransport.close(): closes the session. closeInfo can be NULL to close
 // with code 0 and an empty reason.

@@ -944,9 +944,14 @@
             "valueLength": 16
         },
         "WebTransportOptions": {
-            "__size__": 16,
-            "serverCertificateHashes": 0,
-            "serverCertificateHashesCount": 8
+            "__size__": 40,
+            "allowPooling": 0,
+            "congestionControl": 4,
+            "protocols": 8,
+            "protocolsCount": 16,
+            "requireUnreliable": 1,
+            "serverCertificateHashes": 24,
+            "serverCertificateHashesCount": 32
         },
         "__cxa_exception": {
             "__size__": 48,

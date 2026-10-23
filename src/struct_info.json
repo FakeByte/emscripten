@@ -1326,6 +1326,11 @@
                 "valueLength"
             ],
             "WebTransportOptions": [
+                "allowPooling",
+                "requireUnreliable",
+                "congestionControl",
+                "protocols",
+                "protocolsCount",
                 "serverCertificateHashes",
                 "serverCertificateHashesCount"
             ],

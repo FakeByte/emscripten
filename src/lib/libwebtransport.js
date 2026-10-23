@@ -60,16 +60,38 @@ var LibraryWebTransport = {
     setPromiseCallback(transportId, name, callback, invoke) {
       var record = WT.getTransport(transportId);
       if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+      if (!record.transport[name]) return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
       var entry = callback ? {} : null;
       record.callbacks[name] = entry;
       if (entry) WT.onSettled(record.transport[name], () => record.callbacks[name] === entry, invoke);
       return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
     },
 
+    // Indexed by the WebTransportCongestionControl enum.
+    congestionControls: ['default', 'throughput', 'low-latency'],
+    // Indexed by the WebTransportReliabilityMode enum.
+    reliabilityModes: ['pending', 'reliable-only', 'supports-unreliable'],
+
     // Converts a WebTransportOptions struct to the JS options dictionary.
+    // Throws a TypeError for invalid enum values.
     readOptions(ptr) {
       if (!ptr) return undefined;
-      var options = {};
+      var congestionControl = WT.congestionControls[{{{ makeGetValue('ptr', C_STRUCTS.WebTransportOptions.congestionControl, 'i32') }}}];
+      if (!congestionControl) throw new TypeError('invalid congestionControl');
+      var options = {
+        allowPooling: !!{{{ makeGetValue('ptr', C_STRUCTS.WebTransportOptions.allowPooling, 'i8') }}},
+        requireUnreliable: !!{{{ makeGetValue('ptr', C_STRUCTS.WebTransportOptions.requireUnreliable, 'i8') }}},
+        congestionControl,
+      };
+      var protocols = {{{ makeGetValue('ptr', C_STRUCTS.WebTransportOptions.protocols, '*') }}};
+      var protocolsCount = {{{ makeGetValue('ptr', C_STRUCTS.WebTransportOptions.protocolsCount, '*') }}};
+      if (protocolsCount) {
+        options.protocols = [];
+        for (var i = 0; i < protocolsCount; i++) {
+          var protocol = protocols + i * {{{ POINTER_SIZE }}};
+          options.protocols.push(UTF8ToString({{{ makeGetValue('protocol', 0, '*') }}}));
+        }
+      }
       var hashes = {{{ makeGetValue('ptr', C_STRUCTS.WebTransportOptions.serverCertificateHashes, '*') }}};
       var hashesCount = {{{ makeGetValue('ptr', C_STRUCTS.WebTransportOptions.serverCertificateHashesCount, '*') }}};
       if (hashesCount) {
@@ -90,6 +112,9 @@ var LibraryWebTransport = {
 
   emscripten_webtransport_is_supported__proxy: 'sync',
   emscripten_webtransport_is_supported: () => typeof WebTransport != 'undefined',
+
+  emscripten_webtransport_supports_reliable_only__proxy: 'sync',
+  emscripten_webtransport_supports_reliable_only: () => !!globalThis.WebTransport?.supportsReliableOnly,
 
   emscripten_webtransport_new__deps: ['$WT'],
   emscripten_webtransport_new__proxy: 'sync',
@@ -123,6 +148,51 @@ var LibraryWebTransport = {
       }
       {{{ makeDynCall('vippp', 'callback') }}}(transportId, closeInfoPtr, error, userData);
     }),
+
+  emscripten_webtransport_set_ondraining_callback__deps: ['$WT'],
+  emscripten_webtransport_set_ondraining_callback__proxy: 'sync',
+  emscripten_webtransport_set_ondraining_callback: (transportId, userData, callback) =>
+    WT.setPromiseCallback(transportId, 'draining', callback, () => {
+      {{{ makeDynCall('vip', 'callback') }}}(transportId, userData);
+    }),
+
+  emscripten_webtransport_get_reliability__deps: ['$WT'],
+  emscripten_webtransport_get_reliability__proxy: 'sync',
+  emscripten_webtransport_get_reliability: (transportId, reliability) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    {{{ makeSetValue('reliability', 0, 'WT.reliabilityModes.indexOf(record.transport.reliability)', 'i32') }}};
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_get_congestion_control__deps: ['$WT'],
+  emscripten_webtransport_get_congestion_control__proxy: 'sync',
+  emscripten_webtransport_get_congestion_control: (transportId, congestionControl) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    {{{ makeSetValue('congestionControl', 0, 'WT.congestionControls.indexOf(record.transport.congestionControl)', 'i32') }}};
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_get_protocol__deps: ['$WT', '$stringToUTF8'],
+  emscripten_webtransport_get_protocol__proxy: 'sync',
+  emscripten_webtransport_get_protocol: (transportId, protocol, protocolLength) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!protocol) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+    stringToUTF8(record.transport.protocol ?? '', protocol, protocolLength);
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_get_protocol_length__deps: ['$WT', '$lengthBytesUTF8'],
+  emscripten_webtransport_get_protocol_length__proxy: 'sync',
+  emscripten_webtransport_get_protocol_length: (transportId, protocolLength) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!protocolLength) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+    {{{ makeSetValue('protocolLength', 0, 'lengthBytesUTF8(record.transport.protocol ?? "") + 1', 'i32') }}};
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
 
   emscripten_webtransport_close__deps: ['$WT'],
   emscripten_webtransport_close__proxy: 'sync',

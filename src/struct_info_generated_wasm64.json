@@ -751,12 +751,6 @@
             "isText": 20,
             "numBytes": 16
         },
-        "EmscriptenWebTransportCreateAttributes": {
-            "__size__": 32,
-            "allowPooling": 8,
-            "congestionControl": 16,
-            "requireUnreliable": 24
-        },
         "EmscriptenWheelEvent": {
             "__size__": 96,
             "deltaMode": 88,
@@ -927,6 +921,22 @@
             "audioParamDescriptors": 16,
             "name": 0,
             "numAudioParams": 8
+        },
+        "WebTransportCloseInfo": {
+            "__size__": 16,
+            "closeCode": 0,
+            "reason": 8
+        },
+        "WebTransportCreateOptions": {
+            "__size__": 16,
+            "serverCertificateHashes": 0,
+            "serverCertificateHashesCount": 8
+        },
+        "WebTransportHash": {
+            "__size__": 24,
+            "algorithm": 0,
+            "value": 8,
+            "valueLength": 16
         },
         "__cxa_exception": {
             "__size__": 48,

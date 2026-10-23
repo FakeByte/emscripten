@@ -32,7 +32,7 @@ void test_is_supported() {
 EMSCRIPTEN_WEBTRANSPORT_T g_transport = 0;
 int g_onready_callback_fired = 0;
 int g_onclosed_callback_fired = 0;
-unsigned short g_closed_callback_code = 0;
+int g_closed_callback_code = 0;
 char g_closed_callback_reason[256] = {0};
 
 // Deferred exit callback - called after JS cleanup completes
@@ -42,7 +42,7 @@ void deferred_exit(void* userData) {
 }
 
 // Callback function for onclosed event
-void on_webtransport_closed(EMSCRIPTEN_WEBTRANSPORT_T transport, void* userData, unsigned short closeCode, const char* reason) {
+void on_webtransport_closed(EMSCRIPTEN_WEBTRANSPORT_T transport, void* userData, int closeCode, const char* reason) {
   printf("  onclosed callback fired! transport=%d, userData=%p, closeCode=%d, reason=%s\n", transport, userData, closeCode, reason ? reason : "(null)");
   g_onclosed_callback_fired = 1;
   g_closed_callback_code = closeCode;
@@ -82,7 +82,10 @@ void on_webtransport_ready(EMSCRIPTEN_WEBTRANSPORT_T transport, void* userData) 
 
   // Close the connection
   printf("  Closing connection...\n");
-  result = emscripten_webtransport_close(g_transport, 1000, "Test complete");
+  WebTransportCloseInfo closeInfo;
+  closeInfo.closeCode = 1000;
+  closeInfo.reason = "Test complete";
+  result = emscripten_webtransport_close(g_transport, &closeInfo);
   assert(result == EMSCRIPTEN_RESULT_SUCCESS);
 
   // The onclosed callback will be fired when the connection is closed

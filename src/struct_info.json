@@ -1317,6 +1317,10 @@
             "WebTransportCreateOptions": [
                 "serverCertificateHashes",
                 "serverCertificateHashesCount"
+            ],
+            "WebTransportCloseInfo": [
+                "closeCode",
+                "reason"
             ]
         }
     },

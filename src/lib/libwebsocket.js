@@ -410,7 +410,7 @@ var LibraryWebSocket = {
   emscripten_websocket_is_supported__proxy: 'sync',
   emscripten_websocket_is_supported: () => typeof WebSocket !== 'undefined',
 
-  emscripten_websocket_deinitialize__deps: ['$webSockets', 'emscripten_websocket_delete'],
+  emscripten_websocket_deinitialize__deps: ['$webSockets', '_emscripten_websocket_delete'],
   emscripten_websocket_deinitialize__proxy: 'sync',
   emscripten_websocket_deinitialize: () => {
 #if WEBSOCKET_DEBUG

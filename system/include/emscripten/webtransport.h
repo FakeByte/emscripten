@@ -25,6 +25,11 @@ typedef struct WebTransportCreateOptions {
   int serverCertificateHashesCount;
 } WebTransportCreateOptions;
 
+typedef struct WebTransportCloseInfo {
+  int closeCode;
+  const char *reason;
+} WebTransportCloseInfo;
+
 bool emscripten_webtransport_is_supported(void);
 
 // Creates a new WebTransport and connects it to the given remote host.
@@ -40,13 +45,13 @@ EMSCRIPTEN_RESULT emscripten_webtransport_set_onready_callback(EMSCRIPTEN_WEBTRA
 // Callback for when the WebTransport connection is closed.
 // closeCode: The error code for the closure (0 if not provided).
 // reason: The reason string for the closure (may be empty).
-typedef void (*em_webtransport_closed_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData, unsigned short closeCode, const char *reason);
+typedef void (*em_webtransport_closed_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData, int closeCode, const char *reason);
 EMSCRIPTEN_RESULT emscripten_webtransport_set_onclosed_callback(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData, em_webtransport_closed_callback_func callback);
 
 // Closes the specified WebTransport connection.
-// closeCode: A code indicating the reason for closing. If 0, no close code is sent.
-// reason: A string describing the reason for closing. Can be NULL.
-EMSCRIPTEN_RESULT emscripten_webtransport_close(EMSCRIPTEN_WEBTRANSPORT_T transport, unsigned short closeCode, const char *reason);
+// closeInfo: A pointer to a WebTransportCloseInfo struct containing the close code and reason.
+// Can be NULL to close without providing close info.
+EMSCRIPTEN_RESULT emscripten_webtransport_close(EMSCRIPTEN_WEBTRANSPORT_T transport, WebTransportCloseInfo *closeInfo);
 
 // Releases the given WebTransport object and all associated allocated memory for garbage collection.
 // This effectively frees the transport handle, after calling this function the given handle no longer exists.

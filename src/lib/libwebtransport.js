@@ -96,19 +96,21 @@ var LibraryWebTransport = {
 
   emscripten_webtransport_close__deps: ['$WT'],
   emscripten_webtransport_close__proxy: 'sync',
-  emscripten_webtransport_close: (transportId, closeCode, reason) => {
+  emscripten_webtransport_close: (transportId, closeInfoPtr) => {
     var transport = WT.getTransport(transportId);
     if (!transport) {
       return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
     }
 
-    var reasonStr = reason ? UTF8ToString(reason) : undefined;
-
     try {
-      // Build close info object
+      // Build close info object from struct if provided
       var closeInfo = {};
-      if (closeCode) closeInfo.closeCode = closeCode;
-      if (reasonStr) closeInfo.reason = reasonStr;
+      if (closeInfoPtr) {
+        var closeCode = {{{ makeGetValue('closeInfoPtr', C_STRUCTS.WebTransportCloseInfo.closeCode, 'i32') }}};
+        var reasonPtr = {{{ makeGetValue('closeInfoPtr', C_STRUCTS.WebTransportCloseInfo.reason, '*') }}};
+        if (closeCode) closeInfo.closeCode = closeCode;
+        if (reasonPtr) closeInfo.reason = UTF8ToString(reasonPtr);
+      }
 
       // Close the transport
       transport.close(closeInfo);

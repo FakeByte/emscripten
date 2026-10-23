@@ -1337,6 +1337,9 @@
             "WebTransportCloseInfo": [
                 "closeCode",
                 "reason"
+            ],
+            "WebTransportSendStreamOptions": [
+                "sendOrder"
             ]
         }
     },

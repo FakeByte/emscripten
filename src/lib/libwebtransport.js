@@ -5,15 +5,65 @@
  */
 
 var LibraryWebTransport = {
-  // Maps handles to {transport, callbacks}, where `callbacks` holds the
-  // currently registered callback entry for each promise of the transport.
+  // Maps handles to transport records: {transport, callbacks, streams,
+  // deleted}, where `callbacks` holds the currently registered callback entry
+  // for each promise of the transport and `streams` the ids of its streams.
   $webTransports__deps: ['$HandleAllocator'],
   $webTransports: 'new HandleAllocator();',
 
-  $WT__deps: ['$webTransports', '$callUserCallback', '$withStackSave', '$stackAlloc', '$stringToUTF8OnStack'],
+  // Maps handles to stream records: {transport, readable, writable, reader,
+  // writer, buffer, deleted}. A record wraps either a ReadableStream or a
+  // WritableStream of `transport` (a transport record). The reader or writer
+  // is acquired on first use, `buffer` is an ArrayBuffer reused for reads.
+  $webTransportStreams__deps: ['$HandleAllocator'],
+  $webTransportStreams: 'new HandleAllocator();',
+
+  $WT__deps: ['$webTransports', '$webTransportStreams', '$callUserCallback', '$withStackSave', '$stackAlloc', '$stringToUTF8OnStack', '$readI53FromI64'],
   $WT: {
     getTransport(transportId) {
       return webTransports.has(transportId) ? webTransports.get(transportId) : null;
+    },
+
+    getStream(streamId) {
+      return webTransportStreams.has(streamId) ? webTransportStreams.get(streamId) : null;
+    },
+
+    allocateStream(transport, stream) {
+      var streamId = webTransportStreams.allocate({transport, ...stream});
+      transport.streams.add(streamId);
+      return streamId;
+    },
+
+    deleteStream(streamId) {
+      var stream = webTransportStreams.get(streamId);
+      stream.deleted = true;
+      // Rejects pending reads, whose callbacks are not called anymore.
+      stream.reader?.releaseLock();
+      stream.writer?.releaseLock();
+      stream.transport.streams.delete(streamId);
+      webTransportStreams.free(streamId);
+    },
+
+    getReader(stream) {
+      return stream.reader ??= stream.readable.getReader({mode: 'byob'});
+    },
+
+    getWriter(stream) {
+      return stream.writer ??= stream.writable.getWriter();
+    },
+
+    // Returns the promise returned by `fn`, or a promise rejected with the
+    // exception `fn` throws.
+    attempt(fn) {
+      return new Promise((resolve) => resolve(fn()));
+    },
+
+    // Converts a WebTransportSendStreamOptions struct to the JS dictionary.
+    readSendStreamOptions(ptr) {
+      if (!ptr) return undefined;
+      return {
+        sendOrder: {{{ makeGetValue('ptr', C_STRUCTS.WebTransportSendStreamOptions.sendOrder, 'i53') }}},
+      };
     },
 
     // Maps an exception thrown synchronously by the WebTransport API to an
@@ -46,8 +96,13 @@ var LibraryWebTransport = {
     // Calls `callback(value, errorPtr)` from the event loop once `promise`
     // settles, unless `isActive()` returns false by then. errorPtr is 0 if the
     // promise fulfilled. Anything the callback allocates on the stack is
-    // released after it returns.
+    // released after it returns. Without a callback the promise's outcome is
+    // ignored.
     onSettled(promise, isActive, callback) {
+      if (!callback) {
+        promise.catch(() => {});
+        return;
+      }
       var settle = (value, rejected, reason) => {
         if (!isActive()) return;
         callUserCallback(() => withStackSave(() => callback(value, rejected ? WT.errorOnStack(reason) : 0)));
@@ -126,7 +181,7 @@ var LibraryWebTransport = {
     } catch (e) {
       return WT.resultFromException(e);
     }
-    return webTransports.allocate({transport, callbacks: {}});
+    return webTransports.allocate({transport, callbacks: {}, streams: new Set()});
   },
 
   emscripten_webtransport_set_onready_callback__deps: ['$WT'],
@@ -222,7 +277,123 @@ var LibraryWebTransport = {
     if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
     // Deactivates all pending callbacks, see setPromiseCallback().
     record.callbacks = {};
+    record.deleted = true;
+    record.incomingUnidirectionalReader?.releaseLock();
+    for (var streamId of record.streams) WT.deleteStream(streamId);
     webTransports.free(transportId);
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_create_unidirectional_stream__deps: ['$WT'],
+  emscripten_webtransport_create_unidirectional_stream__proxy: 'sync',
+  emscripten_webtransport_create_unidirectional_stream: (transportId, options, userData, callback) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!callback) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+    var promise = WT.attempt(() => record.transport.createUnidirectionalStream(WT.readSendStreamOptions(options)));
+    WT.onSettled(promise, () => !record.deleted, (writable, error) => {
+      var streamId = error ? 0 : WT.allocateStream(record, {writable});
+      {{{ makeDynCall('viipp', 'callback') }}}(transportId, streamId, error, userData);
+    });
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_read_incoming_unidirectional_stream__deps: ['$WT'],
+  emscripten_webtransport_read_incoming_unidirectional_stream__proxy: 'sync',
+  emscripten_webtransport_read_incoming_unidirectional_stream: (transportId, userData, callback) => {
+    var record = WT.getTransport(transportId);
+    if (!record) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!callback) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+    var promise = WT.attempt(() => (record.incomingUnidirectionalReader ??= record.transport.incomingUnidirectionalStreams.getReader()).read());
+    WT.onSettled(promise, () => !record.deleted, (result, error) => {
+      var streamId = result?.done === false ? WT.allocateStream(record, {readable: result.value}) : 0;
+      {{{ makeDynCall('viipp', 'callback') }}}(transportId, streamId, error, userData);
+    });
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_stream_read__deps: ['$WT'],
+  emscripten_webtransport_stream_read__proxy: 'sync',
+  emscripten_webtransport_stream_read: (streamId, buffer, length, userData, callback) => {
+    var stream = WT.getStream(streamId);
+    if (!stream) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!stream.readable) return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
+    if (!buffer || !length || !callback) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+    // A BYOB read cannot fill the Wasm memory directly since it transfers the
+    // buffer it reads into, so it reads into a JS buffer which is then copied
+    // and reused by the next read.
+    var scratch = stream.buffer?.byteLength >= length ? stream.buffer : new ArrayBuffer(length);
+    stream.buffer = null;
+    var promise = WT.attempt(() => WT.getReader(stream).read(new Uint8Array(scratch, 0, length)));
+    WT.onSettled(promise, () => !stream.deleted, (result, error) => {
+      var numBytes = 0;
+      // A read that was pending when the stream got canceled has no value.
+      if (result?.value) {
+        stream.buffer = result.value.buffer;
+        numBytes = result.value.length;
+        HEAPU8.set(result.value, buffer);
+      }
+      {{{ makeDynCall('vipipp', 'callback') }}}(streamId, numBytes, !!result?.done, error, userData);
+    });
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_stream_write__deps: ['$WT'],
+  emscripten_webtransport_stream_write__proxy: 'sync',
+  emscripten_webtransport_stream_write: (streamId, data, length, userData, callback) => {
+    var stream = WT.getStream(streamId);
+    if (!stream) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!stream.writable) return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
+    if (!data && length) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_PARAM }}};
+    // Copy the data so that the caller can reuse its buffer right away.
+    var chunk = HEAPU8.slice(data, data + length);
+    var promise = WT.attempt(() => WT.getWriter(stream).write(chunk));
+    WT.onSettled(promise, () => !stream.deleted, callback && ((value, error) => {
+      {{{ makeDynCall('vipp', 'callback') }}}(streamId, error, userData);
+    }));
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_stream_close__deps: ['$WT'],
+  emscripten_webtransport_stream_close__proxy: 'sync',
+  emscripten_webtransport_stream_close: (streamId, userData, callback) => {
+    var stream = WT.getStream(streamId);
+    if (!stream) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!stream.writable) return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
+    var promise = WT.attempt(() => WT.getWriter(stream).close());
+    WT.onSettled(promise, () => !stream.deleted, callback && ((value, error) => {
+      {{{ makeDynCall('vipp', 'callback') }}}(streamId, error, userData);
+    }));
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_stream_abort__deps: ['$WT'],
+  emscripten_webtransport_stream_abort__proxy: 'sync',
+  emscripten_webtransport_stream_abort: (streamId, streamErrorCode) => {
+    var stream = WT.getStream(streamId);
+    if (!stream) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!stream.writable) return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
+    var reason = new WebTransportError({message: 'Stream aborted', streamErrorCode});
+    WT.onSettled(WT.attempt(() => WT.getWriter(stream).abort(reason)));
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_stream_cancel__deps: ['$WT'],
+  emscripten_webtransport_stream_cancel__proxy: 'sync',
+  emscripten_webtransport_stream_cancel: (streamId, streamErrorCode) => {
+    var stream = WT.getStream(streamId);
+    if (!stream) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    if (!stream.readable) return {{{ cDefs.EMSCRIPTEN_RESULT_NOT_SUPPORTED }}};
+    var reason = new WebTransportError({message: 'Stream canceled', streamErrorCode});
+    WT.onSettled(WT.attempt(() => WT.getReader(stream).cancel(reason)));
+    return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
+  },
+
+  emscripten_webtransport_stream_delete__deps: ['$WT'],
+  emscripten_webtransport_stream_delete__proxy: 'sync',
+  emscripten_webtransport_stream_delete: (streamId) => {
+    if (!WT.getStream(streamId)) return {{{ cDefs.EMSCRIPTEN_RESULT_INVALID_TARGET }}};
+    WT.deleteStream(streamId);
     return {{{ cDefs.EMSCRIPTEN_RESULT_SUCCESS }}};
   },
 

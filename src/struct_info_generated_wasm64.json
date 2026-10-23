@@ -953,6 +953,10 @@
             "serverCertificateHashes": 24,
             "serverCertificateHashesCount": 32
         },
+        "WebTransportSendStreamOptions": {
+            "__size__": 8,
+            "sendOrder": 0
+        },
         "__cxa_exception": {
             "__size__": 48,
             "adjustedPtr": 32,

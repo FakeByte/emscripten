@@ -359,6 +359,319 @@ static void test_connection_properties(void) {
   CHECK_SUCCESS(emscripten_webtransport_set_onready_callback(t, NULL, on_properties_ready));
 }
 
+// Helpers for the stream tests
+
+// Reads a stream to its end in reads of chunkSize bytes, then calls on_done.
+typedef struct StreamReader {
+  EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream;
+  size_t chunkSize;
+  void (*on_done)(struct StreamReader *reader);
+  uint8_t *data;
+  size_t length;
+  size_t capacity;
+} StreamReader;
+
+static void read_next_chunk(StreamReader *reader);
+
+static void on_chunk_read(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, size_t numBytes, bool done, const WebTransportError *error, void *userData) {
+  StreamReader *reader = userData;
+  CHECK(stream == reader->stream);
+  CHECK_NO_ERROR(error);
+  if (done) {
+    CHECK(numBytes == 0);
+    reader->on_done(reader);
+    return;
+  }
+  CHECK(numBytes > 0 && numBytes <= reader->chunkSize);
+  reader->length += numBytes;
+  read_next_chunk(reader);
+}
+
+static void read_next_chunk(StreamReader *reader) {
+  if (reader->capacity - reader->length < reader->chunkSize) {
+    reader->capacity = reader->length + reader->chunkSize;
+    reader->data = realloc(reader->data, reader->capacity);
+  }
+  CHECK_SUCCESS(emscripten_webtransport_stream_read(reader->stream, reader->data + reader->length, reader->chunkSize, reader, on_chunk_read));
+}
+
+static void start_reading(StreamReader *reader, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, size_t chunkSize, void (*on_done)(StreamReader *reader)) {
+  free(reader->data);
+  *reader = (StreamReader){.stream = stream, .chunkSize = chunkSize, .on_done = on_done};
+  read_next_chunk(reader);
+}
+
+static void fill_pattern(uint8_t *data, size_t length) {
+  for (size_t i = 0; i < length; i++) data[i] = (uint8_t)(i * 31 + i / 251);
+}
+
+static void check_write_succeeded(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+}
+
+static void fail_on_read(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, size_t numBytes, bool done, const WebTransportError *error, void *userData) {
+  printf("FAIL [%s] unexpected read callback for stream %d\n", current_test_name, stream);
+  emscripten_force_exit(1);
+}
+
+static void fail_on_stream(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  printf("FAIL [%s] unexpected stream callback for transport %d\n", current_test_name, t);
+  emscripten_force_exit(1);
+}
+
+// Checks that calls a writable stream does not support fail.
+static void check_not_readable(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream) {
+  char buffer[4];
+  CHECK_RESULT(emscripten_webtransport_stream_read(stream, buffer, sizeof(buffer), NULL, fail_on_read), EMSCRIPTEN_RESULT_NOT_SUPPORTED);
+  CHECK_RESULT(emscripten_webtransport_stream_cancel(stream, 0), EMSCRIPTEN_RESULT_NOT_SUPPORTED);
+}
+
+// Checks that calls a readable stream does not support fail.
+static void check_not_writable(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream) {
+  CHECK_RESULT(emscripten_webtransport_stream_write(stream, "x", 1, NULL, NULL), EMSCRIPTEN_RESULT_NOT_SUPPORTED);
+  CHECK_RESULT(emscripten_webtransport_stream_close(stream, NULL, NULL), EMSCRIPTEN_RESULT_NOT_SUPPORTED);
+  CHECK_RESULT(emscripten_webtransport_stream_abort(stream, 0), EMSCRIPTEN_RESULT_NOT_SUPPORTED);
+}
+
+// The stream tests share one connection, which is opened by
+// test_open_shared_transport() and closed by test_close_shared_transport().
+static EMSCRIPTEN_WEBTRANSPORT_T shared;
+static StreamReader reader;
+static int pending_steps;
+
+static void on_shared_ready(EMSCRIPTEN_WEBTRANSPORT_T t, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  next_test();
+}
+
+static void test_open_shared_transport(void) {
+  shared = emscripten_webtransport_new(ECHO_SERVER_URL, NULL);
+  CHECK(shared > 0);
+  CHECK_SUCCESS(emscripten_webtransport_set_onready_callback(shared, NULL, on_shared_ready));
+}
+
+static void test_stream_invalid_arguments(void) {
+  char buffer[4];
+  CHECK_RESULT(emscripten_webtransport_create_unidirectional_stream(12345, NULL, NULL, fail_on_stream), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_create_unidirectional_stream(shared, NULL, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_PARAM);
+  CHECK_RESULT(emscripten_webtransport_read_incoming_unidirectional_stream(12345, NULL, fail_on_stream), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_read_incoming_unidirectional_stream(shared, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_PARAM);
+  CHECK_RESULT(emscripten_webtransport_stream_read(12345, buffer, sizeof(buffer), NULL, fail_on_read), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_stream_write(12345, "x", 1, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_stream_close(12345, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_stream_abort(12345, 0), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_stream_cancel(12345, 0), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_stream_delete(12345), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  next_test();
+}
+
+// Sends a message on a unidirectional stream in two writes. The server echoes
+// it on a unidirectional stream of its own, which is read in small chunks.
+
+static const char uni_message[] = "Hello, unidirectional world!";
+static EMSCRIPTEN_WEBTRANSPORT_STREAM_T uni_writable;
+
+static void finish_unidirectional_test(void) {
+  if (--pending_steps) return;
+  CHECK_SUCCESS(emscripten_webtransport_stream_delete(reader.stream));
+  CHECK_SUCCESS(emscripten_webtransport_stream_delete(uni_writable));
+  CHECK_RESULT(emscripten_webtransport_stream_delete(uni_writable), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  next_test();
+}
+
+static void on_uni_echo_read(StreamReader *r) {
+  printf("  received %zu bytes: %.*s\n", r->length, (int)r->length, r->data);
+  CHECK(r->length == strlen(uni_message));
+  CHECK(memcmp(r->data, uni_message, r->length) == 0);
+  finish_unidirectional_test();
+}
+
+static void on_incoming_uni_stream(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK(t == shared);
+  CHECK(userData == (void *)0x77);
+  CHECK_NO_ERROR(error);
+  CHECK(stream > 0);
+  check_not_writable(stream);
+  start_reading(&reader, stream, 5, on_uni_echo_read);
+}
+
+static void on_uni_closed(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK(stream == uni_writable);
+  CHECK(userData == (void *)0x99);
+  CHECK_NO_ERROR(error);
+  finish_unidirectional_test();
+}
+
+static void on_second_write(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK(stream == uni_writable);
+  CHECK(userData == (void *)0x88);
+  CHECK_NO_ERROR(error);
+  finish_unidirectional_test();
+}
+
+static void on_uni_created(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK(t == shared);
+  CHECK(userData == (void *)0x66);
+  CHECK_NO_ERROR(error);
+  CHECK(stream > 0);
+  uni_writable = stream;
+  check_not_readable(stream);
+  // The data is copied, so the buffer can change right after the write.
+  char message[sizeof(uni_message)];
+  strcpy(message, uni_message);
+  CHECK_SUCCESS(emscripten_webtransport_stream_write(stream, message, 7, NULL, NULL));
+  memset(message, '?', 7);
+  CHECK_SUCCESS(emscripten_webtransport_stream_write(stream, message + 7, strlen(message) - 7, (void *)0x88, on_second_write));
+  CHECK_SUCCESS(emscripten_webtransport_stream_close(stream, (void *)0x99, on_uni_closed));
+}
+
+static void test_unidirectional_stream(void) {
+  // Callbacks of the incoming stream, the second write, the close.
+  pending_steps = 3;
+  // Waiting for an incoming stream can start before there is one.
+  CHECK_SUCCESS(emscripten_webtransport_read_incoming_unidirectional_stream(shared, (void *)0x77, on_incoming_uni_stream));
+  WebTransportSendStreamOptions options = {.sendOrder = 5};
+  CHECK_SUCCESS(emscripten_webtransport_create_unidirectional_stream(shared, &options, (void *)0x66, on_uni_created));
+}
+
+// Echoes a large message, which arrives in many reads.
+
+#define LARGE_MESSAGE_SIZE 200000
+static uint8_t *large_message;
+
+static void on_large_echo_read(StreamReader *r) {
+  printf("  received %zu bytes\n", r->length);
+  CHECK(r->length == LARGE_MESSAGE_SIZE);
+  CHECK(memcmp(r->data, large_message, LARGE_MESSAGE_SIZE) == 0);
+  CHECK_SUCCESS(emscripten_webtransport_stream_delete(r->stream));
+  free(large_message);
+  next_test();
+}
+
+static void on_large_incoming(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  CHECK(stream > 0);
+  start_reading(&reader, stream, 65536, on_large_echo_read);
+}
+
+static void on_large_created(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  CHECK_SUCCESS(emscripten_webtransport_stream_write(stream, large_message, LARGE_MESSAGE_SIZE, NULL, check_write_succeeded));
+  CHECK_SUCCESS(emscripten_webtransport_stream_close(stream, NULL, check_write_succeeded));
+  // Deleting the handle does not close the stream or discard written data.
+  CHECK_SUCCESS(emscripten_webtransport_stream_delete(stream));
+  CHECK_SUCCESS(emscripten_webtransport_read_incoming_unidirectional_stream(shared, NULL, on_large_incoming));
+}
+
+static void test_large_unidirectional_stream(void) {
+  large_message = malloc(LARGE_MESSAGE_SIZE);
+  fill_pattern(large_message, LARGE_MESSAGE_SIZE);
+  CHECK_SUCCESS(emscripten_webtransport_create_unidirectional_stream(shared, NULL, NULL, on_large_created));
+}
+
+// Closing the transport finishes waiting for incoming streams.
+
+static void on_shared_closed(EMSCRIPTEN_WEBTRANSPORT_T t, const WebTransportCloseInfo *closeInfo, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  if (--pending_steps == 0) {
+    CHECK_SUCCESS(emscripten_webtransport_delete(shared));
+    next_test();
+  }
+}
+
+static void on_no_more_uni_streams(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK(t == shared);
+  CHECK_NO_ERROR(error);
+  CHECK(stream == 0);
+  if (--pending_steps == 0) {
+    CHECK_SUCCESS(emscripten_webtransport_delete(shared));
+    next_test();
+  }
+}
+
+static void test_close_shared_transport(void) {
+  pending_steps = 2;
+  CHECK_SUCCESS(emscripten_webtransport_read_incoming_unidirectional_stream(shared, NULL, on_no_more_uni_streams));
+  CHECK_SUCCESS(emscripten_webtransport_set_onclosed_callback(shared, NULL, on_shared_closed));
+  CHECK_SUCCESS(emscripten_webtransport_close(shared, NULL));
+}
+
+// Aborting and canceling streams. These run on a connection of their own since
+// the server's reaction to them must not interfere with other tests.
+
+static EMSCRIPTEN_WEBTRANSPORT_T reset_transport;
+static EMSCRIPTEN_WEBTRANSPORT_STREAM_T aborted_stream;
+
+static void on_cancel_read(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, size_t numBytes, bool done, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  CHECK(done);
+  CHECK(numBytes == 0);
+  CHECK_SUCCESS(emscripten_webtransport_close(reset_transport, NULL));
+  // Deleting the transport deletes its streams.
+  CHECK_SUCCESS(emscripten_webtransport_delete(reset_transport));
+  CHECK_RESULT(emscripten_webtransport_stream_delete(stream), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  CHECK_RESULT(emscripten_webtransport_stream_write(aborted_stream, "x", 1, NULL, NULL), EMSCRIPTEN_RESULT_INVALID_TARGET);
+  next_test();
+}
+
+static void on_incoming_to_cancel(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  CHECK(stream > 0);
+  CHECK_SUCCESS(emscripten_webtransport_stream_cancel(stream, 4));
+  // After canceling, reads finish without data.
+  static char buffer[16];
+  CHECK_SUCCESS(emscripten_webtransport_stream_read(stream, buffer, sizeof(buffer), NULL, on_cancel_read));
+}
+
+static void on_stream_to_echo(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  CHECK_SUCCESS(emscripten_webtransport_stream_write(stream, "cancel me", 9, NULL, check_write_succeeded));
+  CHECK_SUCCESS(emscripten_webtransport_stream_close(stream, NULL, check_write_succeeded));
+  CHECK_SUCCESS(emscripten_webtransport_read_incoming_unidirectional_stream(reset_transport, NULL, on_incoming_to_cancel));
+}
+
+static void finish_abort(void) {
+  if (--pending_steps) return;
+  CHECK_SUCCESS(emscripten_webtransport_create_unidirectional_stream(reset_transport, NULL, NULL, on_stream_to_echo));
+}
+
+static void on_write_after_abort(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK(error);
+  print_error("write after abort", error);
+  CHECK(strcmp(error->name, "WebTransportError") == 0);
+  CHECK(error->source == WEBTRANSPORT_ERROR_SOURCE_STREAM);
+  CHECK(error->streamErrorCode == 7);
+  finish_abort();
+}
+
+static void on_close_after_abort(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK(error);
+  print_error("close after abort", error);
+  finish_abort();
+}
+
+static void on_stream_to_abort(EMSCRIPTEN_WEBTRANSPORT_T t, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  aborted_stream = stream;
+  CHECK_SUCCESS(emscripten_webtransport_stream_write(stream, "abc", 3, NULL, check_write_succeeded));
+  CHECK_SUCCESS(emscripten_webtransport_stream_abort(stream, 7));
+  // Writing and closing fail with the abort reason.
+  pending_steps = 2;
+  CHECK_SUCCESS(emscripten_webtransport_stream_write(stream, "def", 3, NULL, on_write_after_abort));
+  CHECK_SUCCESS(emscripten_webtransport_stream_close(stream, NULL, on_close_after_abort));
+}
+
+static void on_reset_transport_ready(EMSCRIPTEN_WEBTRANSPORT_T t, const WebTransportError *error, void *userData) {
+  CHECK_NO_ERROR(error);
+  CHECK_SUCCESS(emscripten_webtransport_create_unidirectional_stream(t, NULL, NULL, on_stream_to_abort));
+}
+
+static void test_abort_and_cancel(void) {
+  reset_transport = emscripten_webtransport_new(ECHO_SERVER_URL, NULL);
+  CHECK(reset_transport > 0);
+  CHECK_SUCCESS(emscripten_webtransport_set_onready_callback(reset_transport, NULL, on_reset_transport_ready));
+}
+
 static void test_deinitialize(void) {
   EMSCRIPTEN_WEBTRANSPORT_T a = emscripten_webtransport_new(ECHO_SERVER_URL, NULL);
   EMSCRIPTEN_WEBTRANSPORT_T b = emscripten_webtransport_new(ECHO_SERVER_URL, NULL);
@@ -380,6 +693,12 @@ static const Test all_tests[] = {
   {"supports_reliable_only", test_supports_reliable_only},
   {"invalid_options", test_invalid_options},
   {"connection_properties", test_connection_properties},
+  {"open_shared_transport", test_open_shared_transport},
+  {"stream_invalid_arguments", test_stream_invalid_arguments},
+  {"unidirectional_stream", test_unidirectional_stream},
+  {"large_unidirectional_stream", test_large_unidirectional_stream},
+  {"close_shared_transport", test_close_shared_transport},
+  {"abort_and_cancel", test_abort_and_cancel},
   {"delete_removes_callbacks", test_delete_removes_callbacks},
   {"deinitialize", test_deinitialize},
 };

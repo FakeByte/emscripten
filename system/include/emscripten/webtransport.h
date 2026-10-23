@@ -32,6 +32,11 @@ extern "C" {
 // Handle to a WebTransport object. Valid handles are > 0.
 typedef int EMSCRIPTEN_WEBTRANSPORT_T;
 
+// Handle to a stream of a transport, valid handles are > 0. A stream handle
+// refers to either the readable side (a WebTransportReceiveStream) or the
+// writable side (a WebTransportSendStream) of a WebTransport stream.
+typedef int EMSCRIPTEN_WEBTRANSPORT_STREAM_T;
+
 // WebTransportError.source
 typedef enum WebTransportErrorSource {
   // The error is not a WebTransportError (e.g. an InvalidStateError
@@ -100,6 +105,12 @@ typedef struct WebTransportCloseInfo {
   const char *reason;
 } WebTransportCloseInfo;
 
+// Options for creating outgoing streams.
+typedef struct WebTransportSendStreamOptions {
+  // Queued bytes of streams with a higher send order are sent first.
+  int64_t sendOrder;
+} WebTransportSendStreamOptions;
+
 // Returns true if the browser supports WebTransport.
 bool emscripten_webtransport_is_supported(void);
 
@@ -158,9 +169,65 @@ EMSCRIPTEN_RESULT emscripten_webtransport_get_protocol_length(EMSCRIPTEN_WEBTRAN
 // with code 0 and an empty reason.
 EMSCRIPTEN_RESULT emscripten_webtransport_close(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportCloseInfo *closeInfo);
 
-// Releases the transport handle, after which it is no longer valid and none of
-// its callbacks are called anymore. This does not close the transport.
+// Releases the transport handle and the handles of all its streams, after which
+// they are no longer valid and none of their callbacks are called anymore. This
+// does not close the transport.
 EMSCRIPTEN_RESULT emscripten_webtransport_delete(EMSCRIPTEN_WEBTRANSPORT_T transport);
+
+// Streams
+//
+// Streams are reliable and ordered. Their data is read and written with the
+// emscripten_webtransport_stream_*() functions below.
+
+// Called with a new stream, or with stream 0 and the reason if there is none.
+// An incoming stream callback receives stream 0 and no error once the
+// transport is closed and no more streams arrive.
+typedef void (*em_webtransport_stream_callback_func)(EMSCRIPTEN_WEBTRANSPORT_T transport, EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData);
+
+// WebTransport.createUnidirectionalStream(): opens a stream to the server and
+// calls callback with its writable side. options can be NULL.
+EMSCRIPTEN_RESULT emscripten_webtransport_create_unidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, const WebTransportSendStreamOptions *options, void *userData, em_webtransport_stream_callback_func callback);
+
+// Reads the next stream from WebTransport.incomingUnidirectionalStreams, a
+// stream opened by the server, and calls callback with its readable side.
+EMSCRIPTEN_RESULT emscripten_webtransport_read_incoming_unidirectional_stream(EMSCRIPTEN_WEBTRANSPORT_T transport, void *userData, em_webtransport_stream_callback_func callback);
+
+// Called once a read finished. On success numBytes bytes were written to the
+// buffer passed to emscripten_webtransport_stream_read(). done is true once
+// the end of the stream is reached, in which case numBytes is 0.
+typedef void (*em_webtransport_read_callback_func)(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, size_t numBytes, bool done, const WebTransportError *error, void *userData);
+// Called once a write or close finished, error is NULL on success.
+typedef void (*em_webtransport_stream_result_callback_func)(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const WebTransportError *error, void *userData);
+
+// Reads up to bufferLength bytes from a readable stream into buffer, which has
+// to stay valid until the callback is called. Like recv(), a read returns
+// whatever data is available, which can be less than bufferLength, so call it
+// in a loop until done is true. Returns EMSCRIPTEN_RESULT_NOT_SUPPORTED for a
+// writable stream.
+EMSCRIPTEN_RESULT emscripten_webtransport_stream_read(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, void * _Nonnull buffer, size_t bufferLength, void *userData, em_webtransport_read_callback_func callback);
+
+// Writes length bytes to a writable stream. The data is copied, so the buffer
+// can be reused right away. callback can be NULL, otherwise it is called once
+// the data was handed over to the network. Returns
+// EMSCRIPTEN_RESULT_NOT_SUPPORTED for a readable stream.
+EMSCRIPTEN_RESULT emscripten_webtransport_stream_write(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, const void *data, size_t length, void *userData, em_webtransport_stream_result_callback_func callback);
+
+// Gracefully closes a writable stream after all written data is sent.
+// callback can be NULL.
+EMSCRIPTEN_RESULT emscripten_webtransport_stream_close(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, void *userData, em_webtransport_stream_result_callback_func callback);
+
+// Aborts a writable stream (WritableStream.abort()), discarding data that was
+// not sent yet. The server receives the given application error code.
+EMSCRIPTEN_RESULT emscripten_webtransport_stream_abort(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, uint8_t streamErrorCode);
+
+// Cancels a readable stream (ReadableStream.cancel()), asking the server to
+// stop sending with the given application error code. Pending and later reads
+// finish with done set.
+EMSCRIPTEN_RESULT emscripten_webtransport_stream_cancel(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream, uint8_t streamErrorCode);
+
+// Releases the stream handle. Pending callbacks of the stream are not called
+// anymore. This does not close the stream.
+EMSCRIPTEN_RESULT emscripten_webtransport_stream_delete(EMSCRIPTEN_WEBTRANSPORT_STREAM_T stream);
 
 // Closes and deletes all transports. You can call this at application exit to
 // tear down all connections.
